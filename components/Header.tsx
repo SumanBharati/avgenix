@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { User } from "@supabase/supabase-js";
@@ -21,6 +21,7 @@ function MoonIcon() {
 
 export default function Header() {
   const router = useRouter();
+  const pathname = usePathname();
   const { theme, toggle } = useTheme();
   const [user, setUser] = useState<User | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -95,6 +96,12 @@ export default function Header() {
       </div>
 
       <div className="flex items-center gap-2">
+        {user && (
+          <nav className="mr-1 flex items-center gap-1" aria-label="Primary">
+            <Link href="/" className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${pathname === "/" ? "bg-forge-surface text-heading" : "text-muted hover:bg-forge-surface hover:text-heading"}`}>Home</Link>
+            <Link href="/dashboard" className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${pathname === "/dashboard" || pathname.startsWith("/dashboard/") ? "bg-forge-surface text-heading" : "text-muted hover:bg-forge-surface hover:text-heading"}`}>Dashboard</Link>
+          </nav>
+        )}
         <button onClick={toggle} className="flex h-9 w-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-forge-surface hover:text-heading" title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}>
           {theme === "dark" ? <SunIcon /> : <MoonIcon />}
         </button>
