@@ -23,8 +23,13 @@ export function useCanvasAnnotations(opts: {
   // getPoint returns) into a display string for the Dimension tool — e.g.
   // Room Designer passes pixels/planScale through its feet-inches formatter.
   // Hosts that don't pass one (no real-world scale to convert against) just
-  // get the raw distance labeled "px".
-  formatDistance?: (dist: number) => string;
+  // get the raw distance labeled "px". The canvas key (e.g. "plan"/"ceil"/
+  // "elev" for Room Designer's multi-canvas hosts) is passed through too —
+  // different canvases can run at entirely different px-per-foot scales
+  // (Room Designer's Elevations pane recomputes its own scale per view,
+  // independent of the Floor Plan's), so a host with more than one scale
+  // needs to know which canvas a given dimension was measured on.
+  formatDistance?: (dist: number, canvasKey?: string) => string;
 }) {
   const { getPoint } = opts;
   const getZoom = opts.getZoom ?? (() => 1);
@@ -548,7 +553,7 @@ export function useCanvasAnnotations(opts: {
           <polygon points={headAt(g.d2.x, g.d2.y, g.d1.x, g.d1.y)} fill={stroke} />
           <text x={g.midX} y={g.midY} dy={-4} textAnchor="middle" fontSize={11} fill={stroke} fontFamily="'JetBrains Mono',monospace"
             transform={`rotate(${g.textAngle}, ${g.midX}, ${g.midY})`}>
-            {formatDistance(g.length)}
+            {formatDistance(g.length, a.canvas || currentCanvasRef.current)}
           </text>
         </g>
       );

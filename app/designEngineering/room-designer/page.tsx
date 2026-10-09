@@ -120,6 +120,13 @@ interface PlacedDevice extends DeviceCatalogItem {
   // at which point it defaults to fanning outward from the room's center
   // (see defaultCalloutOffset).
   calloutDx?: number; calloutDy?: number;
+  // Same idea, but for the Elevations pane's own call-out — kept separate
+  // from calloutDx/calloutDy above since that's a Plan/Ceiling-view offset
+  // (measured from the device's plan position, fanning out radially) while
+  // this one is measured from the device's on-screen elevation box (up and
+  // to the side by default); the two views have no reason to share one
+  // dragged position.
+  calloutElevDx?: number; calloutElevDy?: number;
   // Equipment spec fields, editable via the same "Edit Equipment" form used
   // by Signal Flow Builder/Rack Planner — mostly informational for a floor
   // plan (this tool has no cabling/rack concept of its own), kept here only
@@ -608,8 +615,44 @@ export default function RoomDesignerPage() {
   const [activeElevationKey,     setActiveElevationKey]     = useState<string | null>(null);
   const [elevMarkerDrag,         setElevMarkerDrag]         = useState<{id: number} | null>(null);
   const [elevMarkerContextMenu,  setElevMarkerContextMenu]  = useState<{x: number; y: number; id: number} | null>(null);
+  // Dragging equipment directly in the Elevations pane — horizontal motion
+  // slides the device along the wall it's facing (`perp`, the view's own
+  // left-right axis, so the drag stays flush to whichever wall/angle is
+  // being viewed); vertical motion changes its mount height (z, feet AFF).
+  // `perp` is captured at drag start since it depends on which elevation
+  // view is active and doesn't change mid-drag.
+  const [elevItemDrag, setElevItemDrag] = useState<{
+    uid: number; startSvgX: number; startSvgY: number;
+    origX: number; origY: number; origZ: number;
+    perpX: number; perpY: number; isCeiling: boolean; hFt: number;
+  } | null>(null);
+  // Dragging an equipment call-out label in the Elevations pane, separate
+  // from dragging the equipment box itself — stores the offset (feet, scaled
+  // by whichever elevation view's own eScale at render time) in
+  // calloutElevDx/Dy rather than moving the device.
+  const [elevCalloutDrag, setElevCalloutDrag] = useState<{
+    uid: number; startSvgX: number; startSvgY: number; origDxFt: number; origDyFt: number;
+  } | null>(null);
+  // Double-click the bottom-of-equipment dimension label to type an exact
+  // mount height instead of dragging for it — same inline-edit convention as
+  // the wall-length editor below.
+  const [editingElevDimUid, setEditingElevDimUid] = useState<number | null>(null);
+  const [elevDimInput, setElevDimInput] = useState("");
+  const elevDimInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (editingElevDimUid === null) return;
+    requestAnimationFrame(() => { elevDimInputRef.current?.focus(); elevDimInputRef.current?.select(); });
+  }, [editingElevDimUid]);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  // The Elevations pane's own px/ft scale (`eScale`, computed per-render from
+  // whichever elevation view is active — it depends on that view's wall width
+  // and room height, not room width/length, so it's unrelated to the Floor/
+  // Ceiling Plan's scale and changes when the user switches elevation tabs).
+  // Kept in a ref — refreshed every render by the Elevations pane itself,
+  // just below — so the Dimension tool's formatDistance (declared here,
+  // before that pane computes it) always reads the current value.
+  const elevScaleRef = useRef(1);
 
   // Annotations (Text / Shape / Pencil / Highlight / Eraser) on the floor plan
   // canvas — stored in the plan SVG's user space so they pan/zoom with the view
@@ -618,25 +661,38 @@ export default function RoomDesignerPage() {
     // handlers, wired into all three canvases (Floor Plan/Ceiling Plan/
     // Elevations), each compute points against whichever <svg> they actually
     // fired on — every one of them shares the same 600x420 viewBox
-    // convention, just with its own independent zoom/pan.
+    // convention, just with its own independent zoom/pan. e.currentTarget
+    // isn't always the <svg> root itself, though — dragging an *existing*
+    // annotation (CanvasAnnotations' own startDrag) attaches its mousedown
+    // listener directly to that annotation's rendered element (a <path>,
+    // <rect>, <g>, <text>…), none of which implement createSVGPoint. Walk up
+    // to the owning root via ownerSVGElement in that case.
     getPoint: (e) => {
-      const svg = e.currentTarget as SVGSVGElement; if (!svg) return null;
+      const el = e.currentTarget as unknown as SVGSVGElement | SVGGraphicsElement;
+      if (!el) return null;
+      const svg = typeof (el as SVGSVGElement).createSVGPoint === "function"
+        ? (el as SVGSVGElement)
+        : (el as SVGGraphicsElement).ownerSVGElement;
+      if (!svg) return null;
       const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
       const p = pt.matrixTransform(svg.getScreenCTM()!.inverse());
       return { x: p.x, y: p.y };
     },
     getZoom: () => zoom,
-    // The Dimension tool measures in this SVG's own user-space units, which
-    // are plan pixels (px/ft = min(380/roomW, 270/roomL), same formula as
-    // the later `planScale` const) — convert back to feet-inches for the
-    // label, matching the rest of the plan view's own formatting. Computed
-    // inline (not via the shared `planScale`/`toDisplay` consts declared
-    // further down the component) because `useCanvasAnnotations` renders any
-    // already-loaded annotation immediately when called here — before this
-    // component's own later `const`s have run in this render pass, so a
-    // dimension annotation loaded from a save would hit them mid-TDZ.
-    formatDistance: (px) => {
-      const ftScale = Math.min(380 / roomW, 270 / roomL);
+    // The Dimension tool measures in each canvas's own user-space units,
+    // which only share one px/ft scale on the Floor/Ceiling Plan (px/ft =
+    // min(380/roomW, 270/roomL), same formula as the later `planScale`
+    // const). The Elevations pane runs its own independent scale per view
+    // (see `elevScaleRef` above) — using the plan scale there was giving
+    // dimensions wildly different from the pane's own auto-calculated
+    // bottom-of-equipment height. Computed inline (not via the shared
+    // `planScale`/`toDisplay` consts declared further down the component)
+    // because `useCanvasAnnotations` renders any already-loaded annotation
+    // immediately when called here — before this component's own later
+    // `const`s have run in this render pass, so a dimension annotation
+    // loaded from a save would hit them mid-TDZ.
+    formatDistance: (px, canvasKey) => {
+      const ftScale = canvasKey === "elev" ? elevScaleRef.current : Math.min(380 / roomW, 270 / roomL);
       const totalQ = Math.round((px / ftScale) * 12 * 4);
       const f = Math.floor(totalQ / 48), remQ = totalQ % 48;
       const wholeIn = Math.floor(remQ / 4), q = remQ % 4;
@@ -1375,6 +1431,12 @@ export default function RoomDesignerPage() {
           const x0 = ox + it.u - it.wFt / 2;
           dxf.rect(x0, it.boxBot, it.wFt, Math.max(0.05, it.boxTop - it.boxBot), layer);
           dxf.text(x0 + it.wFt / 2, it.boxTop + 0.15, 0.3, calloutLabel(it.dev), layer, "center");
+          // Bottom-of-equipment-to-FFL dimension, mirroring the on-screen Elevations pane.
+          if (it.boxBot > 0.05) {
+            const dimX = x0 + 0.3;
+            dxf.line(dimX, 0, dimX, it.boxBot, "DIMENSIONS");
+            dxf.text(dimX + 0.15, it.boxBot / 2, 0.25, toFtIn(it.boxBot), "DIMENSIONS", "left");
+          }
         });
         elevSheetX += data.wallWidthFt + 10;
       });
@@ -1833,7 +1895,27 @@ export default function RoomDesignerPage() {
         const depthAlong = rx * dir.x + ry * dir.y;
         const u = rx * perp.x + ry * perp.y - uMin;
         const isCeiling = d.wall === "ceiling" || d.mountWall === "ceiling";
-        const wFt = d.w || 0.5, hFt = d.h || 0.5;
+        const hFt = d.h || 0.5;
+        // Apparent width along this view's own horizontal axis. A wall-mounted
+        // item's real footprint is `w` across the wall by a thin physical
+        // depth into the room (a flat-panel display is only a few inches
+        // deep) — `d.rotation` (set whenever a device snaps to a wall) is
+        // that wall's run direction, so standard oriented-box-onto-axis
+        // projection (apparent = w·|cos θ| + depth·|sin θ|, θ = angle between
+        // the wall and this view) gives the full width head-on and just the
+        // thin depth from a side elevation, instead of always drawing the
+        // mounted width as if every view were looking straight at it.
+        let wFt = d.w || 0.5;
+        if (!isCeiling && typeof d.rotation === "number") {
+          const rot = d.rotation * Math.PI / 180;
+          const wallPerp = { x: Math.cos(rot), y: Math.sin(rot) };
+          const wallNormal = { x: -Math.sin(rot), y: Math.cos(rot) };
+          const depthFt = (d.depth_in ?? 4) / 12;
+          wFt = Math.max(0.05,
+            Math.abs(wFt * (wallPerp.x * perp.x + wallPerp.y * perp.y)) +
+            Math.abs(depthFt * (wallNormal.x * perp.x + wallNormal.y * perp.y))
+          );
+        }
         const centerZ = d.z ?? roomH * 0.55;
         const boxTop = isCeiling ? roomH : centerZ + hFt / 2;
         const boxBot = isCeiling ? roomH - Math.min(hFt, 0.35) : centerZ - hFt / 2;
@@ -1869,6 +1951,55 @@ export default function RoomDesignerPage() {
       const has = m.directions.includes(dir);
       return { ...m, directions: has ? m.directions.filter(d => d !== dir) : [...m.directions, dir] };
     }));
+  };
+  const beginElevItemDrag = (uid: number, perpX: number, perpY: number, e: React.MouseEvent) => {
+    if (e.button !== 0 || annotate.activeTool) return;
+    const dev = placedDevices.find(d => d.uid === uid);
+    const svg = elevSvgRef.current;
+    if (!dev || !svg) return;
+    e.stopPropagation();
+    pushUndo();
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+    setElevItemDrag({
+      uid, startSvgX: svgP.x, startSvgY: svgP.y,
+      origX: dev.x, origY: dev.y, origZ: dev.z ?? roomH * 0.55,
+      perpX, perpY,
+      isCeiling: dev.wall === "ceiling" || dev.mountWall === "ceiling",
+      hFt: dev.h || 0.5,
+    });
+  };
+  const beginElevCalloutDrag = (uid: number, dxFt: number, dyFt: number, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const svg = elevSvgRef.current;
+    if (!svg) return;
+    e.stopPropagation();
+    pushUndo();
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+    setElevCalloutDrag({ uid, startSvgX: svgP.x, startSvgY: svgP.y, origDxFt: dxFt, origDyFt: dyFt });
+  };
+  const commitElevDimEdit = (closeOnInvalid = false) => {
+    if (editingElevDimUid === null) return;
+    const value = parseFtIn(elevDimInput);
+    if (value === null || value < 0) {
+      if (closeOnInvalid) { setEditingElevDimUid(null); setElevDimInput(""); }
+      return;
+    }
+    const uid = editingElevDimUid;
+    pushUndo();
+    setPlacedDevices(prev => prev.map(d => {
+      if (d.uid !== uid) return d;
+      const half = (d.h || 0.5) / 2;
+      // `value` is the bottom-of-equipment height typed in; z is stored as
+      // the device's vertical center, so add back the half-height offset.
+      const newZ = Math.max(half, Math.min(roomH - half, value + half));
+      return { ...d, z: newZ };
+    }));
+    setEditingElevDimUid(null);
+    setElevDimInput("");
   };
 
   // Zoom extents: fit the room (or the drawn walls' extents in custom-blank
@@ -3977,17 +4108,28 @@ export default function RoomDesignerPage() {
   // from the north wall (north/south share that depth axis) and is assumed
   // centered left-right (so it's symmetric for east/west).
   const [guideWall, setGuideWall] = useState<"north" | "south" | "east" | "west">("north");
-  // Seating width and closest viewer default to the room/table geometry
-  // below, but a user can override either with a measured value (e.g. from
-  // a site survey) — overrides are per-wall and reset when the evaluated
-  // wall changes, since a width/distance typed in for one wall doesn't
-  // apply to another.
+  // Seating width defaults to the room/table geometry below, but a user can
+  // override it with a measured value (e.g. from a site survey) — the
+  // override is per-wall and resets when the evaluated wall changes, since a
+  // width typed in for one wall doesn't apply to another.
   const [seatingWidthOverride, setSeatingWidthOverride] = useState<number | null>(null);
-  const [closestViewerOverride, setClosestViewerOverride] = useState<number | null>(null);
-  const [editingGuideField, setEditingGuideField] = useState<"seatingWidth" | "closestViewer" | null>(null);
+  // Bottom of Image Height (BIH) — height of the bottom edge of the display
+  // above the floor. AVIXA DISCAS uses this (plus a standard seated eye
+  // level) to derive the closest comfortable viewing distance below. Default
+  // of 42" is a typical conference-room mounting height; per-wall override
+  // since mounting height can differ by room/display.
+  const DEFAULT_BIH_FT = 42 / 12;
+  const [bihOverride, setBihOverride] = useState<number | null>(null);
+  // DISCAS closest viewer is auto-calculated from BIH + image height, but a
+  // user can override it directly too — e.g. the room's actual front-row
+  // seating is closer/farther than the calculated minimum. This single value
+  // is shared between the Display Size Guide and Camera Guide cards so the
+  // two stay in sync rather than tracking independent "closest viewer" numbers.
+  const [discasClosestViewerOverride, setDiscasClosestViewerOverride] = useState<number | null>(null);
+  const [editingGuideField, setEditingGuideField] = useState<"seatingWidth" | "bottomImageHeight" | "discasClosestViewer" | null>(null);
   const [guideFieldInput, setGuideFieldInput] = useState("");
   const guideFieldInputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { setSeatingWidthOverride(null); setClosestViewerOverride(null); }, [guideWall]);
+  useEffect(() => { setSeatingWidthOverride(null); setBihOverride(null); setDiscasClosestViewerOverride(null); }, [guideWall]);
   useEffect(() => {
     if (!editingGuideField) return;
     requestAnimationFrame(() => { guideFieldInputRef.current?.focus(); guideFieldInputRef.current?.select(); });
@@ -4009,23 +4151,19 @@ export default function RoomDesignerPage() {
   const guideDepth = guideIsNS ? effectiveDepth : effectiveWidth;
   const seatMargin = Math.max(seatDist, 0.35);
 
-  let closestViewer = 0, farthestViewer = 0;
+  let farthestViewer = 0;
   if (validRoom) {
     if (showTable && !tableDeleted) {
       if (guideWall === "north") {
-        closestViewer = tableWallDist;
         farthestViewer = tableWallDist + tL + seatMargin;
       } else if (guideWall === "south") {
-        closestViewer = effectiveDepth - (tableWallDist + tL);
         farthestViewer = effectiveDepth - tableWallDist + seatMargin;
       } else {
         // East/west: table assumed centered across the room's width.
         const nearSide = (effectiveWidth - tW) / 2;
-        closestViewer = nearSide;
         farthestViewer = effectiveWidth - nearSide + seatMargin;
       }
     } else {
-      closestViewer = 4;
       farthestViewer = Math.max(0, guideDepth - 4);
     }
   }
@@ -4035,6 +4173,18 @@ export default function RoomDesignerPage() {
   const recommendedSize = standardSizes.find(s => s >= reqDiagIn) || standardSizes[standardSizes.length - 1];
   const showDisplayGuide = farthestViewer > 0;
 
+  // AVIXA DISCAS closest viewer — same formula as /calculators/display-sizing:
+  // top of screen = BIH + image height; if that's above standard seated eye
+  // level (48"), the 30° max vertical viewing angle sets the closest comfortable
+  // distance, floored by the 0.87x image-height rule for digital content.
+  const bihFt = bihOverride ?? DEFAULT_BIH_FT;
+  const STANDARD_EYE_LEVEL_IN = 48;
+  const topOfScreenIn = bihFt * 12 + imageHeightIn;
+  const aboveEyeIn = topOfScreenIn - STANDARD_EYE_LEVEL_IN;
+  const closestByAngleIn = aboveEyeIn > 0 ? aboveEyeIn / Math.tan(30 * Math.PI / 180) : imageHeightIn * 0.87;
+  const discasClosestViewerFt = Math.max(imageHeightIn * 0.87, closestByAngleIn) / 12;
+  const effectiveDiscasClosestViewer = discasClosestViewerOverride ?? discasClosestViewerFt;
+
   // ── Camera Guide ───────────────────────────────────────────────────────
   const chairMargin = 1;  // 1 foot chair margin
   const seatingWidth = !validRoom ? 0
@@ -4042,16 +4192,18 @@ export default function RoomDesignerPage() {
       ? (guideIsNS ? tW : tL) + 2 * (seatMargin + chairMargin)
       : (guideIsNS ? effectiveWidth : effectiveDepth);
   const effectiveSeatingWidth = seatingWidthOverride ?? seatingWidth;
-  const effectiveClosestViewer = closestViewerOverride ?? closestViewer;
-  const reqHFOV = effectiveClosestViewer > 0
-    ? 2 * Math.atan((effectiveSeatingWidth / 2) / effectiveClosestViewer) * (180 / Math.PI)
+  const reqHFOV = effectiveDiscasClosestViewer > 0
+    ? 2 * Math.atan((effectiveSeatingWidth / 2) / effectiveDiscasClosestViewer) * (180 / Math.PI)
     : 0;
-  const showCameraGuide = effectiveClosestViewer > 0 && farthestViewer > 0;
+  const showCameraGuide = effectiveDiscasClosestViewer > 0 && farthestViewer > 0;
 
-  const beginEditGuideField = (field: "seatingWidth" | "closestViewer") => {
+  const beginEditGuideField = (field: "seatingWidth" | "bottomImageHeight" | "discasClosestViewer") => {
     if (!validRoom) return;
     setEditingGuideField(field);
-    setGuideFieldInput(toEditableLength(field === "seatingWidth" ? effectiveSeatingWidth : effectiveClosestViewer));
+    const current = field === "seatingWidth" ? effectiveSeatingWidth
+      : field === "bottomImageHeight" ? bihFt
+      : effectiveDiscasClosestViewer;
+    setGuideFieldInput(toEditableLength(current));
   };
   const commitGuideFieldEdit = (closeOnInvalid = false) => {
     if (!editingGuideField) return;
@@ -4061,13 +4213,15 @@ export default function RoomDesignerPage() {
       return;
     }
     if (editingGuideField === "seatingWidth") setSeatingWidthOverride(value);
-    else setClosestViewerOverride(value);
+    else if (editingGuideField === "bottomImageHeight") setBihOverride(value);
+    else setDiscasClosestViewerOverride(value);
     setEditingGuideField(null);
     setGuideFieldInput("");
   };
-  const resetGuideField = (field: "seatingWidth" | "closestViewer") => {
+  const resetGuideField = (field: "seatingWidth" | "bottomImageHeight" | "discasClosestViewer") => {
     if (field === "seatingWidth") setSeatingWidthOverride(null);
-    else setClosestViewerOverride(null);
+    else if (field === "bottomImageHeight") setBihOverride(null);
+    else setDiscasClosestViewerOverride(null);
   };
 
   const render3DTable = () => {
@@ -4557,6 +4711,66 @@ export default function RoomDesignerPage() {
               <div style={{display:"flex",justifyContent:"space-between",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6}}>
                 <span>Farthest viewer</span><span style={{fontFamily:"'JetBrains Mono',monospace",color:"#a78bfa"}}>{validRoom ? toDisplay(farthestViewer) : "—"}</span>
               </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6,gap:8}}>
+                <span style={{display:"flex",alignItems:"center",gap:5}}>
+                  Bottom of image height
+                  {validRoom && editingGuideField !== "bottomImageHeight" && (
+                    <button onClick={() => beginEditGuideField("bottomImageHeight")} title="Edit bottom of image height"
+                      style={{display:"flex",padding:2,background:"none",border:"none",cursor:"pointer",color:"rgb(var(--text-faint))"}}
+                      onMouseEnter={e=>e.currentTarget.style.color="#a78bfa"} onMouseLeave={e=>e.currentTarget.style.color="rgb(var(--text-faint))"}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                  )}
+                  {bihOverride !== null && editingGuideField !== "bottomImageHeight" && (
+                    <button onClick={() => resetGuideField("bottomImageHeight")} title="Reset to default (42&quot;)"
+                      style={{fontSize:10,color:"rgb(var(--text-faint))",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>
+                      reset
+                    </button>
+                  )}
+                </span>
+                {editingGuideField === "bottomImageHeight" ? (
+                  <input
+                    ref={guideFieldInputRef}
+                    value={guideFieldInput}
+                    onChange={e => setGuideFieldInput(e.target.value)}
+                    onBlur={() => commitGuideFieldEdit(true)}
+                    onKeyDown={e => { if (e.key === "Enter") commitGuideFieldEdit(); else if (e.key === "Escape") { setEditingGuideField(null); setGuideFieldInput(""); } }}
+                    style={{width:80,fontFamily:"'JetBrains Mono',monospace",fontSize:14,textAlign:"right",background:"rgb(var(--forge-bg))",border:"1px solid #8b5cf6",borderRadius:4,color:"rgb(var(--text-body))",padding:"2px 4px"}}
+                  />
+                ) : (
+                  <span style={{fontFamily:"'JetBrains Mono',monospace",color: bihOverride !== null ? "#a78bfa" : "rgb(var(--text-body))"}}>{validRoom ? toDisplay(bihFt) : "—"}</span>
+                )}
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6,gap:8}}>
+                <span style={{display:"flex",alignItems:"center",gap:5}}>
+                  Closest viewer
+                  {validRoom && editingGuideField !== "discasClosestViewer" && (
+                    <button onClick={() => beginEditGuideField("discasClosestViewer")} title="Edit closest viewer"
+                      style={{display:"flex",padding:2,background:"none",border:"none",cursor:"pointer",color:"rgb(var(--text-faint))"}}
+                      onMouseEnter={e=>e.currentTarget.style.color="#a78bfa"} onMouseLeave={e=>e.currentTarget.style.color="rgb(var(--text-faint))"}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                  )}
+                  {discasClosestViewerOverride !== null && editingGuideField !== "discasClosestViewer" && (
+                    <button onClick={() => resetGuideField("discasClosestViewer")} title="Reset to calculated default"
+                      style={{fontSize:10,color:"rgb(var(--text-faint))",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>
+                      reset
+                    </button>
+                  )}
+                </span>
+                {editingGuideField === "discasClosestViewer" ? (
+                  <input
+                    ref={guideFieldInputRef}
+                    value={guideFieldInput}
+                    onChange={e => setGuideFieldInput(e.target.value)}
+                    onBlur={() => commitGuideFieldEdit(true)}
+                    onKeyDown={e => { if (e.key === "Enter") commitGuideFieldEdit(); else if (e.key === "Escape") { setEditingGuideField(null); setGuideFieldInput(""); } }}
+                    style={{width:80,fontFamily:"'JetBrains Mono',monospace",fontSize:14,textAlign:"right",background:"rgb(var(--forge-bg))",border:"1px solid #8b5cf6",borderRadius:4,color:"rgb(var(--text-body))",padding:"2px 4px"}}
+                  />
+                ) : (
+                  <span style={{fontFamily:"'JetBrains Mono',monospace",color: discasClosestViewerOverride !== null ? "#a78bfa" : "rgb(var(--text-body))"}}>{validRoom ? toDisplay(effectiveDiscasClosestViewer) : "—"}</span>
+                )}
+              </div>
               <div style={{borderTop:"1px solid rgba(139,92,246,0.1)",margin:"6px 0",paddingTop:6,display:"flex",justifyContent:"space-between",fontSize:15,color:"rgb(var(--text-muted))"}}>
                 <span>Req. image height</span><span style={{fontFamily:"'JetBrains Mono',monospace",color:"rgb(var(--text-body))"}}>{validRoom ? `${imageHeightIn.toFixed(1)}"` : "—"}</span>
               </div>
@@ -4592,10 +4806,10 @@ export default function RoomDesignerPage() {
               ))}
             </div>
             <div style={{padding:10,background:"rgba(34,197,94,0.06)",border:"1px solid rgba(34,197,94,0.15)",borderRadius:8}}>
-              {(["seatingWidth", "closestViewer"] as const).map(field => {
+              {(["seatingWidth", "discasClosestViewer"] as const).map(field => {
                 const label = field === "seatingWidth" ? "Seating width" : "Closest viewer";
-                const value = field === "seatingWidth" ? effectiveSeatingWidth : effectiveClosestViewer;
-                const overridden = (field === "seatingWidth" ? seatingWidthOverride : closestViewerOverride) !== null;
+                const value = field === "seatingWidth" ? effectiveSeatingWidth : effectiveDiscasClosestViewer;
+                const overridden = (field === "seatingWidth" ? seatingWidthOverride : discasClosestViewerOverride) !== null;
                 const isEditing = editingGuideField === field;
                 return (
                   <div key={field} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6,gap:8}}>
@@ -6884,10 +7098,44 @@ export default function RoomDesignerPage() {
           const activeView = activeViews.find(v => v.key === activeElevationKey) || activeViews[0];
           const elevData = computeElevation(activeView.marker, ELEVATION_DIR_ANGLES[activeView.dir]);
           const eScale = Math.min(500 / elevData.wallWidthFt, 260 / Math.max(1, elevData.roomHFt));
+          elevScaleRef.current = eScale; // keeps the Dimension tool's formatDistance in sync with this view
           const eOffX = (600 - elevData.wallWidthFt * eScale) / 2;
           const eFloorY = 370;
           const ePX = (xFt: number) => eOffX + xFt * eScale;
           const ePY = (zFt: number) => eFloorY - zFt * eScale;
+          // This view's own left-right axis in plan coordinates — dragging an
+          // item horizontally in the elevation moves it along this vector, so
+          // the move stays flush to the wall/angle currently being viewed.
+          const elevPerp = elevationPerp(ELEVATION_DIR_ANGLES[activeView.dir]);
+          const updateElevItemDrag = (e: React.MouseEvent) => {
+            if (!elevItemDrag) return false;
+            const svg = elevSvgRef.current; if (!svg) return true;
+            const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+            const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+            const deltaU = (svgP.x - elevItemDrag.startSvgX) / eScale;
+            const deltaZ = -(svgP.y - elevItemDrag.startSvgY) / eScale;
+            const newX = Math.max(cMinX, Math.min(cMaxX, elevItemDrag.origX + deltaU * elevItemDrag.perpX));
+            const newY = Math.max(cMinY, Math.min(cMaxY, elevItemDrag.origY + deltaU * elevItemDrag.perpY));
+            setPlacedDevices(prev => prev.map(d => {
+              if (d.uid !== elevItemDrag.uid) return d;
+              if (elevItemDrag.isCeiling) return { ...d, x: newX, y: newY };
+              const half = elevItemDrag.hFt / 2;
+              const newZ = Math.max(half, Math.min(roomH - half, elevItemDrag.origZ + deltaZ));
+              return { ...d, x: newX, y: newY, z: newZ };
+            }));
+            return true;
+          };
+          const updateElevCalloutDrag = (e: React.MouseEvent) => {
+            if (!elevCalloutDrag) return false;
+            const svg = elevSvgRef.current; if (!svg) return true;
+            const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+            const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+            const newDxFt = elevCalloutDrag.origDxFt + (svgP.x - elevCalloutDrag.startSvgX) / eScale;
+            const newDyFt = elevCalloutDrag.origDyFt + (svgP.y - elevCalloutDrag.startSvgY) / eScale;
+            setPlacedDevices(prev => prev.map(d => d.uid === elevCalloutDrag.uid
+              ? { ...d, calloutElevDx: newDxFt, calloutElevDy: newDyFt } : d));
+            return true;
+          };
           return (
             <>
               <div style={{position:"absolute",top:8,left:8,zIndex:5,display:"flex",gap:4,flexWrap:"wrap",maxWidth:"70%"}}>
@@ -6901,11 +7149,13 @@ export default function RoomDesignerPage() {
               <svg ref={elevSvgRef} data-rd-canvas="elev" width="100%" height="100%" viewBox={`${300-300/elevZoom-elevPan.x} ${210-210/elevZoom-elevPan.y} ${600/elevZoom} ${420/elevZoom}`}
                 style={{background:cc.card,cursor:annotate.activeTool?(annotate.cursor||"crosshair"):isElevPanning?"grabbing":panMode?"grab":"default"}}
                 onMouseMove={e=>{
+                  if(updateElevCalloutDrag(e))return;
+                  if(updateElevItemDrag(e))return;
                   if(annotate.activeTool||annotate.isDragging()){annotate.handleMove(e);return;}
                   if(isElevPanning){const dx=(e.clientX-elevPanStart.x)/elevZoom;const dy=(e.clientY-elevPanStart.y)/elevZoom;setElevPan({x:elevPanStart.px+dx,y:elevPanStart.py+dy});}
                 }}
-                onMouseUp={()=>{if(annotate.activeTool||annotate.isDragging()){annotate.handleUp();return;}if(isElevPanning)setIsElevPanning(false);}}
-                onMouseLeave={()=>{annotate.handleLeave();if(isElevPanning)setIsElevPanning(false);}}
+                onMouseUp={()=>{if(elevCalloutDrag){setElevCalloutDrag(null);return;}if(elevItemDrag){setElevItemDrag(null);return;}if(annotate.activeTool||annotate.isDragging()){annotate.handleUp();return;}if(isElevPanning)setIsElevPanning(false);}}
+                onMouseLeave={()=>{if(elevCalloutDrag)setElevCalloutDrag(null);if(elevItemDrag)setElevItemDrag(null);annotate.handleLeave();if(isElevPanning)setIsElevPanning(false);}}
                 onMouseDown={e=>{if(annotate.activeTool&&e.button===0){annotate.handleDown(e);return;}if((e.button===1||(e.button===0&&panMode))&&!lockedViews.elev){e.preventDefault();setIsElevPanning(true);setElevPanStart({x:e.clientX,y:e.clientY,px:elevPan.x,py:elevPan.y});}}}
                 onDoubleClick={e=>{if(annotate.activeTool)annotate.handleDoubleClick(e);}}
               >
@@ -6925,10 +7175,86 @@ export default function RoomDesignerPage() {
                   // rainbow of each device's own accent color. It's the theme's
                   // body-text color (not a fixed dark grey) so it stays readable
                   // on both the light and the dark canvas.
+                  const dimX = Math.min(x0, x1) + 10;
+                  const isDraggingThis = elevItemDrag?.uid === it.dev.uid;
+                  const isCeiling = it.dev.wall === "ceiling" || it.dev.mountWall === "ceiling";
+                  const dimMidY = (eFloorY + y1) / 2;
+                  const isEditingDim = editingElevDimUid === it.dev.uid;
+                  // Call-out styled to match the Plan/Ceiling view's own
+                  // renderCallout — leader line (diagonal stub + elbow) out to
+                  // an offset label, not a bare caption glued to the box, so
+                  // it reads as the same drawing convention everywhere. The
+                  // label itself is draggable too (calloutElevDx/Dy, feet so
+                  // it stays stable if the view's own scale changes), same as
+                  // Plan — its own mousedown stops propagation so grabbing the
+                  // label repositions just the callout, not the whole device.
+                  const calloutAnchorX = (x0 + x1) / 2, calloutAnchorY = y0;
+                  const calloutDxFt = it.dev.calloutElevDx ?? -16 / eScale;
+                  const calloutDyFt = it.dev.calloutElevDy ?? -20 / eScale;
+                  const calloutLabelX = calloutAnchorX + calloutDxFt * eScale, calloutLabelY = calloutAnchorY + calloutDyFt * eScale;
+                  const calloutSide = calloutLabelX >= calloutAnchorX ? 1 : -1;
+                  const calloutElbowX = calloutLabelX - calloutSide * CALLOUT_STUB_PX, calloutElbowY = calloutLabelY;
+                  const calloutText = calloutLabel(it.dev);
+                  const onCalloutMouseDown = (e: React.MouseEvent) => beginElevCalloutDrag(it.dev.uid, calloutDxFt, calloutDyFt, e);
                   return (
-                    <g key={it.dev.uid}>
-                      <rect x={Math.min(x0,x1)} y={y0} width={Math.abs(x1-x0)} height={Math.max(2,y1-y0)} fill="rgb(var(--text-body))" fillOpacity={0.08} stroke="rgb(var(--text-body))" strokeWidth={1.2}/>
-                      <text x={(x0+x1)/2} y={y0-5} textAnchor="middle" fontSize={8} fill="rgb(var(--text-body))" fontWeight={600}>{calloutLabel(it.dev)}</text>
+                    <g key={it.dev.uid}
+                      style={{cursor: annotate.activeTool ? undefined : "move"}}
+                      onMouseDown={e => beginElevItemDrag(it.dev.uid, elevPerp.x, elevPerp.y, e)}>
+                      <rect x={Math.min(x0,x1)} y={y0} width={Math.abs(x1-x0)} height={Math.max(2,y1-y0)} fill="rgb(var(--text-body))" fillOpacity={isDraggingThis?0.18:0.08} stroke={isDraggingThis?"#8b5cf6":"rgb(var(--text-body))"} strokeWidth={isDraggingThis?1.8:1.2}/>
+                      <line x1={calloutAnchorX} y1={calloutAnchorY} x2={calloutElbowX} y2={calloutElbowY} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>
+                      <line x1={calloutElbowX} y1={calloutElbowY} x2={calloutLabelX} y2={calloutLabelY} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>
+                      <circle cx={calloutAnchorX} cy={calloutAnchorY} r={1.2} fill="rgb(var(--text-muted))"/>
+                      {/* Invisible padded rect widens the draggable area to the
+                          label's full apparent extent, same as Plan's own
+                          callout hit-box — a bare <text> only hit-tests ink. */}
+                      <rect x={calloutSide > 0 ? calloutLabelX : calloutLabelX - Math.max(30, calloutText.length * 4.6)} y={calloutLabelY - 5}
+                        width={Math.max(30, calloutText.length * 4.6)} height={9} fill="transparent"
+                        style={{cursor: "move"}} onMouseDown={onCalloutMouseDown}/>
+                      <text x={calloutLabelX + calloutSide * 4} y={calloutLabelY + 2.5} textAnchor={calloutSide > 0 ? "start" : "end"} fontSize={7} fontWeight={600} fill="rgb(var(--text-body))" fontFamily="Inter, sans-serif"
+                        style={{cursor: "move"}} onMouseDown={onCalloutMouseDown}>{calloutText}</text>
+                      {/* Default bottom-of-equipment-to-FFL dimension — mount
+                          height off the floor is the first thing a BOD/elevation
+                          needs to call out, so show it automatically instead of
+                          requiring a manual dimension annotation every time.
+                          Double-click the label to type an exact height instead
+                          of dragging for it (skipped for ceiling-mounted items,
+                          which don't have an independently settable height). */}
+                      {it.boxBot > 0.05 && (
+                        <g onMouseDown={e=>e.stopPropagation()}>
+                          <line x1={dimX} y1={eFloorY} x2={dimX} y2={y1} stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                          <path d={`M${dimX-3},${eFloorY-6} L${dimX},${eFloorY} L${dimX+3},${eFloorY-6}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                          <path d={`M${dimX-3},${y1+6} L${dimX},${y1} L${dimX+3},${y1+6}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                          {isEditingDim ? (
+                            <foreignObject x={dimX+5} y={dimMidY-11} width={68} height={22} onMouseDown={e=>e.stopPropagation()}>
+                              <input
+                                ref={elevDimInputRef}
+                                value={elevDimInput}
+                                onChange={e=>setElevDimInput(e.target.value)}
+                                onBlur={()=>commitElevDimEdit(true)}
+                                onKeyDown={e=>{
+                                  e.stopPropagation();
+                                  if(e.key==="Enter"){e.preventDefault();commitElevDimEdit();}
+                                  if(e.key==="Escape"){e.preventDefault();setEditingElevDimUid(null);setElevDimInput("");}
+                                }}
+                                aria-label="Bottom of equipment height"
+                                title={'Enter a height, for example 3\' 6"'}
+                                style={{width:"100%",height:20,boxSizing:"border-box",border:"1px solid #8b5cf6",borderRadius:3,background:"rgb(var(--forge-bg))",color:"rgb(var(--text-heading))",fontFamily:"'JetBrains Mono',monospace",fontSize:9,fontWeight:600,textAlign:"left",outline:"none",padding:"1px 3px"}}
+                              />
+                            </foreignObject>
+                          ) : (
+                            <text x={dimX+5} y={dimMidY} fontSize={8} fill="rgb(var(--text-muted))" fontFamily="'JetBrains Mono',monospace" dominantBaseline="middle"
+                              style={{cursor: isCeiling ? "default" : "pointer"}}
+                              onDoubleClick={e=>{
+                                e.stopPropagation();
+                                if (isCeiling) return;
+                                setEditingElevDimUid(it.dev.uid);
+                                setElevDimInput(toEditableLength(it.boxBot));
+                              }}>
+                              {toDisplay(it.boxBot)}
+                            </text>
+                          )}
+                        </g>
+                      )}
                     </g>
                   );
                 })}
