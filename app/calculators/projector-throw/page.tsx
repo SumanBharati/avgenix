@@ -71,6 +71,14 @@ function MiniToggle({ value, onChange, options }: {
   );
 }
 
+type LengthUnit = 'ft' | 'in' | 'm';
+// How many feet are in one of this unit. All length state below (throwDist,
+// imgWidth, and everything derived from them) stays canonically in feet —
+// this only converts what's displayed/entered, same approach as the
+// Projector Lumens calculator.
+const FT_PER_UNIT: Record<LengthUnit, number> = { ft: 1, in: 1 / 12, m: 3.28084 };
+const UNIT_STEP: Record<LengthUnit, number> = { ft: 0.5, in: 1, m: 0.1 };
+
 export default function ProjectorThrowPage() {
   const [mode, setMode] = useState<'dist' | 'ratio'>('dist');
   const [throwType, setThrowType] = useState<'fixed' | 'variable'>('fixed');
@@ -80,10 +88,14 @@ export default function ProjectorThrowPage() {
   const [maxTR, setMaxTR] = useState(2.0);
   const [imgWidth, setImgWidth] = useState(10);
   const [aspectRatio, setAspectRatio] = useState('16:9');
+  const [lengthUnit, setLengthUnit] = useState<LengthUnit>('ft');
 
   const ar = ASPECT_RATIOS[aspectRatio] ?? 16 / 9;
   const imgHeight = imgWidth / ar;
   const imgDiag = Math.sqrt(imgWidth ** 2 + imgHeight ** 2);
+
+  const toSelectedUnit = (valueFt: number) => valueFt / FT_PER_UNIT[lengthUnit];
+  const fromSelectedUnit = (valueInUnit: number) => valueInUnit * FT_PER_UNIT[lengthUnit];
 
   // Fixed mode derived values
   const tr = mode === 'dist' ? throwDist / imgWidth : manualTR;
@@ -129,10 +141,26 @@ export default function ProjectorThrowPage() {
               })}
             </div>
 
+            <div className="mb-4">
+              <label className={labelCls}>Select Unit</label>
+              <div className="inline-flex overflow-hidden rounded-lg border border-border">
+                {(['ft', 'in', 'm'] as LengthUnit[]).map(u => (
+                  <button key={u} onClick={() => setLengthUnit(u)}
+                    className="px-5 py-2.5 text-[12px] font-semibold transition-colors"
+                    style={{
+                      background: lengthUnit === u ? 'rgba(139,92,246,0.12)' : 'rgb(var(--forge-surface) / 0.5)',
+                      color: lengthUnit === u ? '#a78bfa' : 'rgb(var(--text-subtle))',
+                    }}>
+                    {u}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="flex flex-col gap-0">
               {mode === 'dist' ? (
                 <Field label={<span className={labelCls}>Throw Distance</span>}>
-                  <UnitInput value={throwDist} onChange={setThrowDist} unit="ft" min={1} max={200} step={0.5} />
+                  <UnitInput value={Number(toSelectedUnit(throwDist).toFixed(2))} onChange={v => setThrowDist(fromSelectedUnit(v))} unit={lengthUnit} min={toSelectedUnit(1)} max={toSelectedUnit(200)} step={UNIT_STEP[lengthUnit]} />
                 </Field>
               ) : (
                 <Field
@@ -164,7 +192,7 @@ export default function ProjectorThrowPage() {
                 </Field>
               )}
               <Field label={<span className={labelCls}>Image Width</span>}>
-                <UnitInput value={imgWidth} onChange={setImgWidth} unit="ft" min={2} max={60} step={0.5} />
+                <UnitInput value={Number(toSelectedUnit(imgWidth).toFixed(2))} onChange={v => setImgWidth(fromSelectedUnit(v))} unit={lengthUnit} min={toSelectedUnit(2)} max={toSelectedUnit(60)} step={UNIT_STEP[lengthUnit]} />
               </Field>
             </div>
 
@@ -201,15 +229,15 @@ export default function ProjectorThrowPage() {
                   </div>
                   {isVariable ? (
                     <div className="font-mono">
-                      <span className="text-2xl font-bold text-blue-400">{minDist.toFixed(1)} – {maxDist.toFixed(1)}</span>
-                      <span className="ml-1.5 text-sm text-subtle">ft</span>
+                      <span className="text-2xl font-bold text-blue-400">{toSelectedUnit(minDist).toFixed(2)} – {toSelectedUnit(maxDist).toFixed(2)}</span>
+                      <span className="ml-1.5 text-sm text-subtle">{lengthUnit}</span>
                     </div>
                   ) : (
                     <div className="font-mono">
                       <span className="text-2xl font-bold text-blue-400">
-                        {mode === 'dist' ? tr.toFixed(2) : computedDist.toFixed(1)}
+                        {mode === 'dist' ? tr.toFixed(2) : toSelectedUnit(computedDist).toFixed(2)}
                       </span>
-                      <span className="ml-1.5 text-sm text-subtle">{mode === 'dist' ? ':1' : 'ft'}</span>
+                      <span className="ml-1.5 text-sm text-subtle">{mode === 'dist' ? ':1' : lengthUnit}</span>
                     </div>
                   )}
                 </div>
@@ -229,8 +257,8 @@ export default function ProjectorThrowPage() {
             {isVariable && (
               <div className="mb-4 grid grid-cols-2 gap-2">
                 {[
-                  { label: 'Min Throw Ratio', value: `${minTR.toFixed(2)} :1`, sub: `→ ${minDist.toFixed(1)} ft` },
-                  { label: 'Max Throw Ratio', value: `${maxTR.toFixed(2)} :1`, sub: `→ ${maxDist.toFixed(1)} ft` },
+                  { label: 'Min Throw Ratio', value: `${minTR.toFixed(2)} :1`, sub: `→ ${toSelectedUnit(minDist).toFixed(2)} ${lengthUnit}` },
+                  { label: 'Max Throw Ratio', value: `${maxTR.toFixed(2)} :1`, sub: `→ ${toSelectedUnit(maxDist).toFixed(2)} ${lengthUnit}` },
                 ].map(({ label, value, sub }) => (
                   <div key={label} className="rounded-lg border border-border bg-forge-surface/30 px-3 py-3">
                     <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">{label}</div>
@@ -244,9 +272,9 @@ export default function ProjectorThrowPage() {
             {/* Image dimensions */}
             <div className="mb-4 grid grid-cols-3 gap-2">
               {[
-                { label: 'Image Width', value: `${imgWidth.toFixed(1)} ft` },
-                { label: 'Image Height', value: `${imgHeight.toFixed(2)} ft` },
-                { label: 'Image Diagonal', value: `${imgDiag.toFixed(2)} ft` },
+                { label: 'Image Width', value: `${toSelectedUnit(imgWidth).toFixed(2)} ${lengthUnit}` },
+                { label: 'Image Height', value: `${toSelectedUnit(imgHeight).toFixed(2)} ${lengthUnit}` },
+                { label: 'Image Diagonal', value: `${toSelectedUnit(imgDiag).toFixed(2)} ${lengthUnit}` },
               ].map(({ label, value }) => (
                 <div key={label} className="rounded-lg border border-border bg-forge-surface/30 px-3 py-3">
                   <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">{label}</div>
@@ -265,30 +293,30 @@ export default function ProjectorThrowPage() {
                   <div>
                     <span className="font-semibold text-blue-400">Min Throw Distance</span>
                     <span className="text-subtle"> = Min TR × Width = </span>
-                    <span className="text-body">{minTR} × {imgWidth} = {minDist.toFixed(1)} ft</span>
+                    <span className="text-body">{minTR} × {toSelectedUnit(imgWidth).toFixed(2)} = {toSelectedUnit(minDist).toFixed(2)} {lengthUnit}</span>
                   </div>
                   <div>
                     <span className="font-semibold text-blue-400">Max Throw Distance</span>
                     <span className="text-subtle"> = Max TR × Width = </span>
-                    <span className="text-body">{maxTR} × {imgWidth} = {maxDist.toFixed(1)} ft</span>
+                    <span className="text-body">{maxTR} × {toSelectedUnit(imgWidth).toFixed(2)} = {toSelectedUnit(maxDist).toFixed(2)} {lengthUnit}</span>
                   </div>
                 </>
               ) : (
                 <div>
                   <span className="font-semibold text-blue-400">Throw Ratio</span>
                   <span className="text-subtle"> = Throw Distance ÷ Image Width = </span>
-                  <span className="text-body">{(mode === 'dist' ? throwDist : computedDist).toFixed(1)} ÷ {imgWidth} = {tr.toFixed(2)}:1</span>
+                  <span className="text-body">{toSelectedUnit(mode === 'dist' ? throwDist : computedDist).toFixed(2)} ÷ {toSelectedUnit(imgWidth).toFixed(2)} = {tr.toFixed(2)}:1</span>
                 </div>
               )}
               <div>
                 <span className="font-semibold text-blue-400">Image Height</span>
                 <span className="text-subtle"> = Width ÷ Aspect ({aspectRatio}) = </span>
-                <span className="text-body">{imgWidth} ÷ {ar.toFixed(4)} = {imgHeight.toFixed(2)} ft</span>
+                <span className="text-body">{toSelectedUnit(imgWidth).toFixed(2)} ÷ {ar.toFixed(4)} = {toSelectedUnit(imgHeight).toFixed(2)} {lengthUnit}</span>
               </div>
               <div>
                 <span className="font-semibold text-blue-400">Image Diagonal</span>
                 <span className="text-subtle"> = √(W² + H²) = </span>
-                <span className="text-body">√({imgWidth}² + {imgHeight.toFixed(2)}²) = {imgDiag.toFixed(2)} ft</span>
+                <span className="text-body">√({toSelectedUnit(imgWidth).toFixed(2)}² + {toSelectedUnit(imgHeight).toFixed(2)}²) = {toSelectedUnit(imgDiag).toFixed(2)} {lengthUnit}</span>
               </div>
             </div>
             <div className="mt-3 border-t border-border pt-3 text-[12px] text-subtle">

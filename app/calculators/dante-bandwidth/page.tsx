@@ -152,9 +152,6 @@ export default function DanteBandwidthPage() {
           </div>
         </div>
 
-        {/* ── Vertical divider ── */}
-        <div className="h-px w-full shrink-0 bg-border xl:h-auto xl:w-px" />
-
         {/* ── Right column: Calculation Guidelines ── */}
         <div className="min-w-0 flex-1">
           <div className="rounded-xl border border-border bg-forge-surface/50 p-5">

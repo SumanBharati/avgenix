@@ -70,9 +70,6 @@ export default function ConduitFillPage() {
           </div>
         </div>
 
-        {/* ── Vertical divider ── */}
-        <div className="h-px w-full shrink-0 bg-border lg:h-auto lg:w-px" />
-
         {/* ── Right half: Results ── */}
         <div className="min-w-0 flex-1">
           <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
