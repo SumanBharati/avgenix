@@ -42,34 +42,44 @@ export async function POST(req: NextRequest) {
 
   const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 
-  let customerId = org.stripe_customer_id as string | null;
-  if (!customerId) {
-    const customer = await stripe.customers.create({
-      email: user.email!,
-      name: org.name,
-      metadata: { org_id: org.id },
+  try {
+    let customerId = org.stripe_customer_id as string | null;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email!,
+        name: org.name,
+        metadata: { org_id: org.id },
+      });
+      customerId = customer.id;
+      await admin.from("organizations").update({ stripe_customer_id: customerId }).eq("id", org.id);
+    }
+
+    // Billed per seat — a team that already has members before its first
+    // checkout starts at that headcount, not 1.
+    const { count } = await admin
+      .from("organization_members")
+      .select("id", { count: "exact", head: true })
+      .eq("org_id", orgId);
+    const seats = Math.max(1, count ?? 1);
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [{ price: process.env.STRIPE_PRO_PRICE_ID!, quantity: seats }],
+      success_url: `${process.env.NEXT_PUBLIC_APP_URL}/projects?upgraded=1`,
+      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/projects`,
+      client_reference_id: org.id,
+      subscription_data: { metadata: { org_id: org.id } },
     });
-    customerId = customer.id;
-    await admin.from("organizations").update({ stripe_customer_id: customerId }).eq("id", org.id);
+
+    return NextResponse.json({ url: session.url });
+  } catch (err) {
+    // Without this, an uncaught Stripe error (e.g. a restricted API key
+    // missing a required permission) crashes the function with an empty
+    // body, which the client sees as "Unexpected end of JSON input"
+    // instead of the actual reason.
+    console.error("Stripe checkout failed:", err instanceof Error ? err.message : err);
+    const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  // Billed per seat — a team that already has members before its first
-  // checkout starts at that headcount, not 1.
-  const { count } = await admin
-    .from("organization_members")
-    .select("id", { count: "exact", head: true })
-    .eq("org_id", orgId);
-  const seats = Math.max(1, count ?? 1);
-
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: customerId,
-    line_items: [{ price: process.env.STRIPE_PRO_PRICE_ID!, quantity: seats }],
-    success_url: `${process.env.NEXT_PUBLIC_APP_URL}/projects?upgraded=1`,
-    cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/projects`,
-    client_reference_id: org.id,
-    subscription_data: { metadata: { org_id: org.id } },
-  });
-
-  return NextResponse.json({ url: session.url });
 }

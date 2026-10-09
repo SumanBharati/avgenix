@@ -40,10 +40,16 @@ export async function POST(req: NextRequest) {
     .single();
   if (!org?.stripe_customer_id) return NextResponse.json({ error: "No billing account yet" }, { status: 400 });
 
-  const portalSession = await stripe.billingPortal.sessions.create({
-    customer: org.stripe_customer_id,
-    return_url: `${process.env.NEXT_PUBLIC_APP_URL}/org/settings`,
-  });
+  try {
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: org.stripe_customer_id,
+      return_url: `${process.env.NEXT_PUBLIC_APP_URL}/org/settings`,
+    });
 
-  return NextResponse.json({ url: portalSession.url });
+    return NextResponse.json({ url: portalSession.url });
+  } catch (err) {
+    console.error("Stripe portal session failed:", err instanceof Error ? err.message : err);
+    const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
