@@ -3977,6 +3977,21 @@ export default function RoomDesignerPage() {
   // from the north wall (north/south share that depth axis) and is assumed
   // centered left-right (so it's symmetric for east/west).
   const [guideWall, setGuideWall] = useState<"north" | "south" | "east" | "west">("north");
+  // Seating width and closest viewer default to the room/table geometry
+  // below, but a user can override either with a measured value (e.g. from
+  // a site survey) — overrides are per-wall and reset when the evaluated
+  // wall changes, since a width/distance typed in for one wall doesn't
+  // apply to another.
+  const [seatingWidthOverride, setSeatingWidthOverride] = useState<number | null>(null);
+  const [closestViewerOverride, setClosestViewerOverride] = useState<number | null>(null);
+  const [editingGuideField, setEditingGuideField] = useState<"seatingWidth" | "closestViewer" | null>(null);
+  const [guideFieldInput, setGuideFieldInput] = useState("");
+  const guideFieldInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setSeatingWidthOverride(null); setClosestViewerOverride(null); }, [guideWall]);
+  useEffect(() => {
+    if (!editingGuideField) return;
+    requestAnimationFrame(() => { guideFieldInputRef.current?.focus(); guideFieldInputRef.current?.select(); });
+  }, [editingGuideField]);
   // Which aspect ratio the recommended diagonal is computed for — displays
   // aren't all 16:9 (videowalls/LED often run 21:9 or wider, older systems
   // 4:3), so the diagonal a user actually needs to shop for depends on this,
@@ -4026,10 +4041,34 @@ export default function RoomDesignerPage() {
     : showTable && !tableDeleted
       ? (guideIsNS ? tW : tL) + 2 * (seatMargin + chairMargin)
       : (guideIsNS ? effectiveWidth : effectiveDepth);
-  const reqHFOV = closestViewer > 0
-    ? 2 * Math.atan((seatingWidth / 2) / closestViewer) * (180 / Math.PI)
+  const effectiveSeatingWidth = seatingWidthOverride ?? seatingWidth;
+  const effectiveClosestViewer = closestViewerOverride ?? closestViewer;
+  const reqHFOV = effectiveClosestViewer > 0
+    ? 2 * Math.atan((effectiveSeatingWidth / 2) / effectiveClosestViewer) * (180 / Math.PI)
     : 0;
-  const showCameraGuide = closestViewer > 0 && farthestViewer > 0;
+  const showCameraGuide = effectiveClosestViewer > 0 && farthestViewer > 0;
+
+  const beginEditGuideField = (field: "seatingWidth" | "closestViewer") => {
+    if (!validRoom) return;
+    setEditingGuideField(field);
+    setGuideFieldInput(toEditableLength(field === "seatingWidth" ? effectiveSeatingWidth : effectiveClosestViewer));
+  };
+  const commitGuideFieldEdit = (closeOnInvalid = false) => {
+    if (!editingGuideField) return;
+    const value = parseFtIn(guideFieldInput);
+    if (value === null || value <= 0) {
+      if (closeOnInvalid) { setEditingGuideField(null); setGuideFieldInput(""); }
+      return;
+    }
+    if (editingGuideField === "seatingWidth") setSeatingWidthOverride(value);
+    else setClosestViewerOverride(value);
+    setEditingGuideField(null);
+    setGuideFieldInput("");
+  };
+  const resetGuideField = (field: "seatingWidth" | "closestViewer") => {
+    if (field === "seatingWidth") setSeatingWidthOverride(null);
+    else setClosestViewerOverride(null);
+  };
 
   const render3DTable = () => {
     if (tableShape==="round") {
@@ -4553,12 +4592,44 @@ export default function RoomDesignerPage() {
               ))}
             </div>
             <div style={{padding:10,background:"rgba(34,197,94,0.06)",border:"1px solid rgba(34,197,94,0.15)",borderRadius:8}}>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6}}>
-                <span>Seating width</span><span style={{fontFamily:"'JetBrains Mono',monospace",color:"rgb(var(--text-body))"}}>{validRoom ? toDisplay(seatingWidth) : "—"}</span>
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6}}>
-                <span>Closest viewer</span><span style={{fontFamily:"'JetBrains Mono',monospace",color:"rgb(var(--text-body))"}}>{validRoom ? toDisplay(closestViewer) : "—"}</span>
-              </div>
+              {(["seatingWidth", "closestViewer"] as const).map(field => {
+                const label = field === "seatingWidth" ? "Seating width" : "Closest viewer";
+                const value = field === "seatingWidth" ? effectiveSeatingWidth : effectiveClosestViewer;
+                const overridden = (field === "seatingWidth" ? seatingWidthOverride : closestViewerOverride) !== null;
+                const isEditing = editingGuideField === field;
+                return (
+                  <div key={field} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6,gap:8}}>
+                    <span style={{display:"flex",alignItems:"center",gap:5}}>
+                      {label}
+                      {validRoom && !isEditing && (
+                        <button onClick={() => beginEditGuideField(field)} title={`Edit ${label.toLowerCase()}`}
+                          style={{display:"flex",padding:2,background:"none",border:"none",cursor:"pointer",color:"rgb(var(--text-faint))"}}
+                          onMouseEnter={e=>e.currentTarget.style.color="#22c55e"} onMouseLeave={e=>e.currentTarget.style.color="rgb(var(--text-faint))"}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                        </button>
+                      )}
+                      {overridden && !isEditing && (
+                        <button onClick={() => resetGuideField(field)} title="Reset to calculated default"
+                          style={{fontSize:10,color:"rgb(var(--text-faint))",background:"none",border:"none",cursor:"pointer",textDecoration:"underline"}}>
+                          reset
+                        </button>
+                      )}
+                    </span>
+                    {isEditing ? (
+                      <input
+                        ref={guideFieldInputRef}
+                        value={guideFieldInput}
+                        onChange={e => setGuideFieldInput(e.target.value)}
+                        onBlur={() => commitGuideFieldEdit(true)}
+                        onKeyDown={e => { if (e.key === "Enter") commitGuideFieldEdit(); else if (e.key === "Escape") { setEditingGuideField(null); setGuideFieldInput(""); } }}
+                        style={{width:80,fontFamily:"'JetBrains Mono',monospace",fontSize:14,textAlign:"right",background:"rgb(var(--forge-bg))",border:"1px solid #22c55e",borderRadius:4,color:"rgb(var(--text-body))",padding:"2px 4px"}}
+                      />
+                    ) : (
+                      <span style={{fontFamily:"'JetBrains Mono',monospace",color: overridden ? "#22c55e" : "rgb(var(--text-body))"}}>{validRoom ? toDisplay(value) : "—"}</span>
+                    )}
+                  </div>
+                );
+              })}
               <div style={{display:"flex",justifyContent:"space-between",fontSize:15,color:"rgb(var(--text-muted))",marginBottom:6}}>
                 <span>Farthest viewer</span><span style={{fontFamily:"'JetBrains Mono',monospace",color:"rgb(var(--text-body))"}}>{validRoom ? toDisplay(farthestViewer) : "—"}</span>
               </div>

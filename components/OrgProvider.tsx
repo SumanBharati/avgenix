@@ -78,6 +78,25 @@ export default function OrgProvider({ children }: { children: React.ReactNode })
   const fetchOrgs = useCallback(async () => {
     setLoading(true);
     setOrgLoadError(null);
+
+    // getSession() reads the local session with no network call. When there
+    // isn't one, skip getUser()'s network round-trip to the auth server —
+    // otherwise an anonymous visitor who clicks a Pro-gated link right after
+    // page load hits "loading" (just a blurred skeleton, no auth modal) for
+    // as long as that request takes, and clicking again does nothing until
+    // it resolves. When a session does exist, still verify it with getUser()
+    // rather than trusting the locally stored session user.
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      userIdRef.current = null;
+      setUser(null);
+      setOrgs([]);
+      setActiveOrgId(null);
+      setHasAccessOverride(false);
+      setLoading(false);
+      return;
+    }
+
     const { data: { user } } = await supabase.auth.getUser();
     userIdRef.current = user?.id ?? null;
     setUser(user);
