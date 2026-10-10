@@ -6,6 +6,7 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { useOrg } from "@/components/OrgProvider";
 import { ROLE_OPTIONS } from "@/lib/pm-store";
+import { type LaborRateType, DEFAULT_LABOR_RATE_TYPES, newLaborRateTypeKey } from "@/lib/labor-rates";
 import ConfirmDialog from "@/components/ConfirmDialog";
 
 type RoleItem = { key: string; value: string };
@@ -16,21 +17,6 @@ function newRoleKey() {
 
 function toRoleItems(roles: string[]): RoleItem[] {
   return roles.map((value) => ({ key: newRoleKey(), value }));
-}
-
-type LaborItem = { key: string; label: string; rate: number; cost: number };
-
-const DEFAULT_LABOR_ITEMS: LaborItem[] = [
-  { key: "engineering", label: "Engineering", rate: 0, cost: 0 },
-  { key: "installation", label: "Installation", rate: 0, cost: 0 },
-  { key: "project_mgmt", label: "Project Mgmt", rate: 0, cost: 0 },
-  { key: "project_coord", label: "Project Coord", rate: 0, cost: 0 },
-  { key: "programming", label: "Programming", rate: 0, cost: 0 },
-  { key: "field_engineering", label: "Field Engineering", rate: 0, cost: 0 },
-];
-
-function newLaborItemKey() {
-  return `labor_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
 const PHONE_COUNTRY_CODES: [string, string][] = [
@@ -173,18 +159,18 @@ export default function OrgSettingsPage() {
     setSavingRoles(false);
   }
 
-  const [laborItems, setLaborItems] = useState<LaborItem[]>(DEFAULT_LABOR_ITEMS);
-  const [savedLaborItems, setSavedLaborItems] = useState<LaborItem[]>(DEFAULT_LABOR_ITEMS);
+  const [laborItems, setLaborItems] = useState<LaborRateType[]>(DEFAULT_LABOR_RATE_TYPES);
+  const [savedLaborItems, setSavedLaborItems] = useState<LaborRateType[]>(DEFAULT_LABOR_RATE_TYPES);
   const isLaborRatesDirty = JSON.stringify(laborItems) !== JSON.stringify(savedLaborItems);
   const [savingLabor, setSavingLabor] = useState(false);
   const [savedLabor, setSavedLabor] = useState(false);
 
-  function updateLaborItem(key: string, patch: Partial<LaborItem>) {
+  function updateLaborItem(key: string, patch: Partial<LaborRateType>) {
     setLaborItems((prev) => prev.map((item) => (item.key === key ? { ...item, ...patch } : item)));
   }
 
   function addLaborItem() {
-    setLaborItems((prev) => [...prev, { key: newLaborItemKey(), label: "New Type", rate: 0, cost: 0 }]);
+    setLaborItems((prev) => [...prev, { key: newLaborRateTypeKey(), label: "New Type", rate: 0, cost: 0 }]);
   }
 
   function removeLaborItem(key: string) {
@@ -242,10 +228,10 @@ export default function OrgSettingsPage() {
             };
             setOrgDetails(loadedOrgDetails);
             setSavedOrgDetails(loadedOrgDetails);
-            const loadedLaborItems: LaborItem[] =
+            const loadedLaborItems: LaborRateType[] =
               Array.isArray(data.labor_line_items) && data.labor_line_items.length > 0
                 ? data.labor_line_items
-                : DEFAULT_LABOR_ITEMS;
+                : DEFAULT_LABOR_RATE_TYPES;
             setLaborItems(loadedLaborItems);
             setSavedLaborItems(loadedLaborItems);
             const loadedCurrency = data.currency ?? "USD";

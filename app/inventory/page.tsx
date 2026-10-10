@@ -1,9 +1,11 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createProduct, deleteProduct, findLibraryDuplicateClusters, findSimilarProducts, getFilterOptions, getKitsReferencingProduct, getProductCount, getProductsByIds, listProducts, updateProduct, type AVProduct, type DuplicateCluster, type KitComponent, type ReferencingKit, type SimilarProductMatch } from "@/lib/av-products";
 import { type OrgEquipmentItem } from "@/lib/equipment-library";
+import { type LaborRateType, DEFAULT_LABOR_RATE_TYPES } from "@/lib/labor-rates";
 import { supabase } from "@/lib/supabase";
 import { useLibraryAdmin } from "@/lib/use-library-admin";
 import { useOrg } from "@/components/OrgProvider";
@@ -155,7 +157,7 @@ const NEWS_TYPE_STYLE: Record<string, string> = {
 const CARDS: { key: Section; label: string; description: string; icon: React.ReactNode; iconBg: string; iconColor: string; stat?: string }[] = [
   {
     key: "org",
-    label: "My Organization's Equipment Library",
+    label: "My Organization's Library",
     description: "Curated catalog of approved equipment specific to your organization.",
     icon: <BuildingIcon size={28} />,
     iconBg: "bg-violet-500/10",
@@ -163,7 +165,7 @@ const CARDS: { key: Section; label: string; description: string; icon: React.Rea
   },
   {
     key: "avgenix",
-    label: "AVGenix Equipment Library",
+    label: "AVGenix Library",
     description: "Vetted AV products and full specifications maintained by AVGenix.",
     icon: <SparkleIcon size={28} />,
     iconBg: "bg-blue-500/10",
@@ -1946,6 +1948,19 @@ function applyFormValueToOrgItem<T extends OrgEquipmentItem | Omit<OrgEquipmentI
   };
 }
 
+// A Labor catalog entry — deliberately much lighter than OrgEquipmentItem
+// (no manufacturer/ports/rack specs, none of which apply to labor). Rate is
+// what you bill; Cost is your own loaded cost, so margin can be shown the
+// same way equipment margin is.
+type LaborItem = {
+  id: string;
+  org_id: string;
+  user_id: string;
+  label: string;
+  rate: number;
+  cost: number;
+};
+
 function OrgLibraryView({ onBack }: { onBack: () => void }) {
   const { activeOrg } = useOrg();
   const [items, setItems] = useState<OrgEquipmentItem[]>([]);
@@ -1966,6 +1981,24 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
   const [bulkCategory, setBulkCategory] = useState("");
   const [bulkSaving, setBulkSaving] = useState(false);
 
+  // Equipment vs. Labor — same page, structurally different tables (see
+  // LaborItem above), so they get their own tab rather than sharing columns
+  // that mostly wouldn't apply to one or the other.
+  const [libView, setLibView] = useState<"equipment" | "labor">("equipment");
+  const [laborItems, setLaborItems] = useState<LaborItem[]>([]);
+  const [laborLoading, setLaborLoading] = useState(true);
+  const [laborSearch, setLaborSearch] = useState("");
+  const [showLaborModal, setShowLaborModal] = useState(false);
+  const [editingLabor, setEditingLabor] = useState<LaborItem | Omit<LaborItem, "id" | "user_id"> | null>(null);
+  const [savingLabor, setSavingLabor] = useState(false);
+  const [laborSaveError, setLaborSaveError] = useState<string | null>(null);
+  const [deleteLaborConfirm, setDeleteLaborConfirm] = useState<LaborItem | null>(null);
+  const [deletingLabor, setDeletingLabor] = useState(false);
+  // The org's standard Labor Rates from Account Settings — what "Add Labor"
+  // picks from, instead of typing a rate/cost by hand.
+  const [laborRateTypes, setLaborRateTypes] = useState<LaborRateType[]>(DEFAULT_LABOR_RATE_TYPES);
+  const [selectedRateKey, setSelectedRateKey] = useState("");
+
   useEffect(() => {
     if (!activeOrg) { setLoading(false); return; }
     setLoading(true);
@@ -1981,6 +2014,46 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
       });
   }, [activeOrg?.id]);
 
+  useEffect(() => {
+    if (!activeOrg) { setLaborLoading(false); return; }
+    setLaborLoading(true);
+    supabase
+      .from("labor_library")
+      .select("*")
+      .eq("org_id", activeOrg.id)
+      .order("label")
+      .then(({ data }) => {
+        setLaborItems((data as LaborItem[]) ?? []);
+        setLaborLoading(false);
+      });
+  }, [activeOrg?.id]);
+
+  // Fetches the org's current standard Labor Rates fresh from the DB and
+  // returns them (also updating state for the dropdown to render from).
+  // Called both on mount AND every time the Add/Edit Labor modal opens —
+  // Settings is a separate page, so an org-id-keyed effect alone would only
+  // ever see whatever rates existed when this component first mounted, and
+  // Next.js's client-side route cache can keep this component alive across a
+  // visit to Settings and back, so even remounting isn't guaranteed. Fetching
+  // again right before the modal opens is what actually guarantees freshness.
+  const fetchLaborRateTypes = useCallback(async (): Promise<LaborRateType[]> => {
+    if (!activeOrg) return DEFAULT_LABOR_RATE_TYPES;
+    const { data } = await supabase.from("organizations").select("labor_line_items").eq("id", activeOrg.id).single();
+    const types: LaborRateType[] =
+      Array.isArray(data?.labor_line_items) && data.labor_line_items.length > 0
+        ? data.labor_line_items
+        : DEFAULT_LABOR_RATE_TYPES;
+    setLaborRateTypes(types);
+    return types;
+  }, [activeOrg]);
+
+  useEffect(() => {
+    fetchLaborRateTypes().then((types) => {
+      setSelectedRateKey((prev) => prev || types[0]?.key || "");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOrg?.id]);
+
   const categories = Array.from(new Set(items.map((i) => i.category).filter(Boolean))).sort();
 
   const filtered = items.filter((item) => {
@@ -1989,6 +2062,8 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
     const matchCat = !filterCategory || item.category === filterCategory;
     return matchSearch && matchCat;
   });
+
+  const laborFiltered = laborItems.filter((item) => !laborSearch || item.label.toLowerCase().includes(laborSearch.toLowerCase()));
 
   function handleRowClick(e: React.MouseEvent, index: number) {
     const item = filtered[index];
@@ -2137,6 +2212,80 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
     setDeleteConfirm(null);
   }
 
+  async function openNewLabor() {
+    if (!activeOrg) return;
+    setLibView("labor");
+    const types = await fetchLaborRateTypes();
+    setSelectedRateKey(types[0]?.key || "");
+    setEditingLabor({ org_id: activeOrg.id, label: "", rate: 0, cost: 0 });
+    setLaborSaveError(null);
+    setShowLaborModal(true);
+  }
+
+  async function openEditLabor(item: LaborItem) {
+    setLibView("labor");
+    const types = await fetchLaborRateTypes();
+    // Labor types aren't referenced by a stable id (Settings stores them as
+    // a plain jsonb list), so matching by label is the best available link
+    // back to "which standard rate is this" when re-opening an existing item.
+    const match = types.find((t) => t.label === item.label);
+    setSelectedRateKey(match?.key || "");
+    setEditingLabor({ ...item });
+    setLaborSaveError(null);
+    setShowLaborModal(true);
+  }
+
+  async function handleSaveLabor() {
+    const selectedType = laborRateTypes.find((t) => t.key === selectedRateKey);
+    if (!editingLabor || !activeOrg || !selectedType) return;
+    setSavingLabor(true);
+    setLaborSaveError(null);
+    // Snapshots the type's current label/rate/cost into the row, rather than
+    // referencing it live — so a later rate change in Settings doesn't
+    // retroactively change items already added to the Library (same
+    // pricing-snapshot approach Procurement uses when releasing an order).
+    const payload = { label: selectedType.label, rate: selectedType.rate, cost: selectedType.cost };
+    if ("id" in editingLabor) {
+      const { error } = await supabase.from("labor_library").update(payload).eq("id", editingLabor.id);
+      if (error) {
+        setLaborSaveError(error.message);
+        setSavingLabor(false);
+        return;
+      }
+      setLaborItems((prev) => prev.map((i) => (i.id === editingLabor.id ? { ...(editingLabor as LaborItem), ...payload } : i)));
+    } else {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        setLaborSaveError("Not signed in.");
+        setSavingLabor(false);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("labor_library")
+        .insert({ org_id: activeOrg.id, user_id: user.id, ...payload })
+        .select("*")
+        .single();
+      if (error) {
+        setLaborSaveError(error.message);
+        setSavingLabor(false);
+        return;
+      }
+      setLaborItems((prev) => [...prev, data as LaborItem]);
+    }
+    setSavingLabor(false);
+    setShowLaborModal(false);
+    setEditingLabor(null);
+  }
+
+  async function confirmDeleteLabor() {
+    if (!deleteLaborConfirm) return;
+    setDeletingLabor(true);
+    await supabase.from("labor_library").delete().eq("id", deleteLaborConfirm.id);
+    setLaborItems((prev) => prev.filter((i) => i.id !== deleteLaborConfirm.id));
+    setDeletingLabor(false);
+    setDeleteLaborConfirm(null);
+  }
+
   const inputCls = "w-full rounded-lg border border-border bg-forge-surface/60 px-3 py-2 text-[13px] text-heading placeholder:text-faint focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30";
   const labelCls = "mb-1 block text-[11px] font-medium text-muted";
 
@@ -2166,18 +2315,59 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
           <span className="text-border">/</span>
           <h2 className="text-xl font-bold text-heading">My Organization&apos;s Equipment Library</h2>
         </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={openNew}
+            className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-blue-500"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Equipment
+          </button>
+          <button
+            onClick={openNewLabor}
+            className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-violet-500"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Labor
+          </button>
+        </div>
+      </div>
+
+      {/* Equipment / Labor tabs */}
+      <div className="mb-4 inline-flex rounded-lg border border-border bg-forge-surface/40 p-1">
         <button
-          onClick={openNew}
-          className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-blue-500"
+          onClick={() => setLibView("equipment")}
+          className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${libView === "equipment" ? "bg-forge-panel text-heading shadow-sm" : "text-muted hover:text-body"}`}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Add Equipment
+          Equipment · {items.length}
+        </button>
+        <button
+          onClick={() => setLibView("labor")}
+          className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${libView === "labor" ? "bg-forge-panel text-heading shadow-sm" : "text-muted hover:text-body"}`}
+        >
+          Labor · {laborItems.length}
         </button>
       </div>
 
+      {libView === "labor" ? (
+      <LaborTable
+        items={laborFiltered}
+        totalCount={laborItems.length}
+        loading={laborLoading}
+        search={laborSearch}
+        onSearchChange={setLaborSearch}
+        onAddFirst={openNewLabor}
+        onEdit={openEditLabor}
+        onDelete={setDeleteLaborConfirm}
+      />
+      ) : (
+      <>
       {/* Filters */}
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 max-w-xs">
@@ -2293,6 +2483,8 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
           </table>
         </div>
       </div>
+      </>
+      )}
 
       {/* Add / Edit Modal */}
       {showModal && editing && (
@@ -2444,7 +2636,199 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       )}
+
+      {/* Add / Edit Labor Modal */}
+      {showLaborModal && editingLabor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-forge-bg shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4">
+              <h3 className="text-[15px] font-bold text-heading">{"id" in editingLabor ? "Edit Labor Item" : "Add Labor Item"}</h3>
+              <button onClick={() => { setShowLaborModal(false); setEditingLabor(null); }} className="text-muted hover:text-heading transition-colors">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            {laborRateTypes.length === 0 ? (
+              <div className="p-6 text-[13px] text-muted">
+                No labor rates configured yet. Add them in{" "}
+                <Link href="/org/settings" className="text-violet-400 hover:text-violet-300 transition-colors">Account Settings → Labor Rates and Costs</Link>
+                {" "}first, then come back here to add them to your Library.
+              </div>
+            ) : (
+              <div className="p-6 space-y-3">
+                <div>
+                  <label className={labelCls}>Labor Type</label>
+                  <select
+                    value={selectedRateKey}
+                    onChange={(e) => setSelectedRateKey(e.target.value)}
+                    className={inputCls}
+                    autoFocus
+                  >
+                    {laborRateTypes.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                  </select>
+                  <p className="mt-1 text-[11px] text-subtle">
+                    From your org&apos;s standard rates — manage these in{" "}
+                    <Link href="/org/settings" className="text-violet-400 hover:text-violet-300 transition-colors">Account Settings</Link>.
+                  </p>
+                </div>
+                {(() => {
+                  const selectedType = laborRateTypes.find((t) => t.key === selectedRateKey);
+                  if (!selectedType) return null;
+                  return (
+                    <div className="grid grid-cols-2 gap-3 rounded-lg border border-border bg-forge-surface/40 p-3">
+                      <div>
+                        <div className="text-[11px] text-muted">Billing Rate</div>
+                        <div className="font-mono text-[13px] text-heading">${selectedType.rate.toLocaleString()}/hr</div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-muted">Your Cost</div>
+                        <div className="font-mono text-[13px] text-heading">${selectedType.cost.toLocaleString()}/hr</div>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {laborSaveError && <p className="text-[12px] text-red-400">{laborSaveError}</p>}
+              </div>
+            )}
+            <div className="flex items-center justify-end gap-3 border-t border-border px-6 py-4">
+              <button onClick={() => { setShowLaborModal(false); setEditingLabor(null); }} className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted transition-colors hover:text-body">
+                Cancel
+              </button>
+              <button onClick={handleSaveLabor} disabled={savingLabor || laborRateTypes.length === 0 || !selectedRateKey} className="rounded-lg bg-violet-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
+                {savingLabor ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Labor confirmation */}
+      {deleteLaborConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-forge-bg p-6 shadow-2xl">
+            <h3 className="text-[15px] font-bold text-heading">Delete labor item?</h3>
+            <p className="mt-2 text-[13px] text-muted">
+              Delete <span className="font-medium text-body">{deleteLaborConfirm.label}</span> from your organization&apos;s labor rates? This cannot be undone.
+            </p>
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setDeleteLaborConfirm(null)}
+                className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted transition-colors hover:text-body"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteLabor}
+                disabled={deletingLabor}
+                className="rounded-lg bg-red-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-red-500 disabled:opacity-50"
+              >
+                {deletingLabor ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function LaborTable({ items, totalCount, loading, search, onSearchChange, onAddFirst, onEdit, onDelete }: {
+  items: LaborItem[];
+  totalCount: number;
+  loading: boolean;
+  search: string;
+  onSearchChange: (v: string) => void;
+  onAddFirst: () => void;
+  onEdit: (item: LaborItem) => void;
+  onDelete: (item: LaborItem) => void;
+}) {
+  return (
+    <>
+      {/* Filters */}
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 max-w-xs">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-faint" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search by label…"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="forge-input w-full pl-8 text-[13px]"
+          />
+        </div>
+        <span className="ml-auto text-[12px] text-subtle">{items.length} of {totalCount} items</span>
+      </div>
+
+      {/* Table */}
+      <div className="rounded-xl border border-border bg-forge-surface/20 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[480px]">
+            <thead>
+              <tr className="border-b border-border bg-forge-surface/60">
+                <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted">Label</th>
+                <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Billing Rate</th>
+                <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Your Cost</th>
+                <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Margin</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-16 text-center text-[13px] text-subtle">Loading…</td>
+                </tr>
+              ) : items.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-16 text-center text-[13px] text-subtle">
+                    {totalCount === 0 ? (
+                      <>
+                        No labor items yet.{" "}
+                        <button onClick={onAddFirst} className="text-violet-400 hover:text-violet-300 transition-colors">Add your first labor item</button>
+                      </>
+                    ) : (
+                      "No items found."
+                    )}
+                  </td>
+                </tr>
+              ) : (
+                items.map((item) => {
+                  const margin = item.rate > 0 ? ((item.rate - item.cost) / item.rate) * 100 : null;
+                  return (
+                    <tr key={item.id} className="border-b border-border/50 transition-colors hover:bg-forge-surface/40">
+                      <td className="px-4 py-3 text-[13px] font-semibold text-heading">{item.label}</td>
+                      <td className="px-4 py-3 text-right font-mono text-[12px] text-body">${item.rate.toLocaleString()}/hr</td>
+                      <td className="px-4 py-3 text-right font-mono text-[12px] text-body">${item.cost.toLocaleString()}/hr</td>
+                      <td className="px-4 py-3 text-right font-mono text-[12px] text-body">{margin === null ? <span className="text-faint">—</span> : `${margin.toFixed(0)}%`}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1">
+                          <button onClick={() => onEdit(item)} className="rounded-md p-1.5 text-muted transition-colors hover:bg-forge-surface hover:text-heading">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
+                          </button>
+                          <button onClick={() => onDelete(item)} className="rounded-md p-1.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-400">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                              <path d="M10 11v6M14 11v6" />
+                              <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
   );
 }
 

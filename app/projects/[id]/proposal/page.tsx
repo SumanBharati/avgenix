@@ -66,7 +66,7 @@ interface ProposalData {
 
 const CATEGORIES = [
   "Display", "Audio", "Video Processing", "Control System", "Cabling",
-  "Mounting Hardware", "Networking", "Miscellaneous",
+  "Mounting Hardware", "Networking", "Labor", "Miscellaneous",
 ];
 
 interface EquipmentEntry {
@@ -79,6 +79,16 @@ interface EquipmentEntry {
   unitCost: number;
   margin?: number | null;
   markup?: number | null;
+}
+
+// A labor_library catalog entry (My Organization's Library → Labor tab).
+// Billed flat as laborHours * laborRate, never marked up like equipment —
+// see the "Labor Breakdown" comment further down.
+interface LaborLibraryEntry {
+  id: string;
+  label: string;
+  rate: number;
+  cost: number;
 }
 
 
@@ -292,6 +302,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
   const [modalSearch, setModalSearch] = useState("");
   const [modalTab, setModalTab] = useState<"library" | "create">("library");
   const [library, setLibrary] = useState<EquipmentEntry[]>([]);
+  const [laborLibrary, setLaborLibrary] = useState<LaborLibraryEntry[]>([]);
   const [newEquip, setNewEquip] = useState<Omit<EquipmentEntry, "id">>({
     category: CATEGORIES[0], manufacturer: "", model: "", partNumber: "", description: "", unitCost: 0,
   });
@@ -329,6 +340,19 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
         await supabase.from("equipment_library").insert(rows);
         if (!cancelled) setLibrary(DEFAULT_LIBRARY);
       }
+    });
+    return () => { cancelled = true; };
+  }, [activeOrg]);
+
+  // Org-scoped Labor catalog (My Organization's Library → Labor tab) — no
+  // seeding on empty, unlike equipment_library above, since an org with no
+  // labor rates configured yet is a normal, expected state.
+  useEffect(() => {
+    if (!activeOrg) return;
+    let cancelled = false;
+    supabase.from("labor_library").select("*").eq("org_id", activeOrg.id).then(({ data }) => {
+      if (cancelled || !data) return;
+      setLaborLibrary(data.map((d) => ({ id: d.id, label: d.label, rate: Number(d.rate), cost: Number(d.cost) })));
     });
     return () => { cancelled = true; };
   }, [activeOrg]);
@@ -734,6 +758,36 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     setModalSearch("");
   }
 
+  function addItemFromLabor(entry: LaborLibraryEntry) {
+    if (!currentSection) return;
+    const item: LineItem = {
+      id: crypto.randomUUID(),
+      category: "Labor",
+      manufacturer: "",
+      model: entry.label,
+      partNumber: undefined,
+      description: entry.label,
+      qty: 1,
+      unitCost: 0,
+      margin: null,
+      markup: null,
+      // 1 hour is just a starting point — adjust in the Labor Hrs column.
+      laborHours: 1,
+      laborRate: entry.rate,
+      changeOrderId: activeChangeOrderId,
+    };
+    const next: ProposalData = {
+      ...proposal,
+      sections: proposal.sections.map((s) =>
+        s.id === currentSection.id ? { ...s, items: [...s.items, item] } : s
+      ),
+    };
+    setProposal(next);
+    if (activeChangeOrderId) saveProposalData(next);
+    setShowAddModal(false);
+    setModalSearch("");
+  }
+
   async function handleCreateAndAdd() {
     const entry: EquipmentEntry = { id: crypto.randomUUID(), ...newEquip };
     const { data: { user } } = await supabase.auth.getUser();
@@ -760,6 +814,10 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
       e.category.toLowerCase().includes(q)
     );
   });
+
+  const filteredLaborLibrary = laborLibrary.filter((e) =>
+    !modalSearch || e.label.toLowerCase().includes(modalSearch.toLowerCase())
+  );
 
   // Calculations
   const currentSection = proposal.sections.find((s) => s.id === activeSection);
@@ -1280,6 +1338,8 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                       <th className="px-3 py-3 text-right">Margin %</th>
                       <th className="px-3 py-3 text-right">Markup %</th>
                       <th className="px-3 py-3 text-right">Unit Price</th>
+                      <th className="px-3 py-3 text-right">Labor Hrs</th>
+                      <th className="px-3 py-3 text-right">Labor Rate</th>
                       <th className="px-3 py-3 text-right">Line Total</th>
                       <th className="w-10 px-2 py-3" />
                     </tr>
@@ -1390,6 +1450,27 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                               step="0.01"
                             />
                           </td>
+                          <td className="px-1 py-1">
+                            <input
+                              type="number"
+                              value={item.laborHours}
+                              onChange={(e) => updateItem(currentSection.id, item.id, "laborHours", parseFloat(e.target.value) || 0)}
+                              title="Hours billed independently of Qty/Unit Price — see Labor Total"
+                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
+                              min="0"
+                              step="0.25"
+                            />
+                          </td>
+                          <td className="px-1 py-1">
+                            <input
+                              type="number"
+                              value={item.laborRate}
+                              onChange={(e) => updateItem(currentSection.id, item.id, "laborRate", parseFloat(e.target.value) || 0)}
+                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
+                              min="0"
+                              step="0.01"
+                            />
+                          </td>
                           <td className="px-3 py-2 text-right font-medium text-body">
                             ${fmt(itemLineTotal(item))}
                           </td>
@@ -1423,6 +1504,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                       <td className="px-3 py-3 text-right text-sm font-bold text-body">
                         ${fmt(sectionSubtotalPrice(currentSection))}
                       </td>
+                      <td />
                       <td />
                     </tr>
                   </tfoot>
@@ -1542,12 +1624,29 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                   </div>
 
                   {/* Results */}
-                  {filteredLibrary.length === 0 ? (
+                  {filteredLibrary.length === 0 && filteredLaborLibrary.length === 0 ? (
                     <div className="py-10 text-center text-sm text-subtle">
-                      No equipment found. Try a different search or create a new item.
+                      No equipment or labor found. Try a different search or create a new item.
                     </div>
                   ) : (
                     <div className="flex flex-col gap-1">
+                      {filteredLaborLibrary.map((entry) => (
+                        <button
+                          key={entry.id}
+                          onClick={() => addItemFromLabor(entry)}
+                          className="flex items-center justify-between rounded-lg px-4 py-3 text-left transition-all hover:bg-forge-surface/40"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[13px] font-semibold text-body">{entry.label}</span>
+                              <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">Labor</span>
+                            </div>
+                          </div>
+                          <span className="ml-4 shrink-0 text-[13px] font-medium text-secondary">
+                            ${fmt(entry.rate)}/hr
+                          </span>
+                        </button>
+                      ))}
                       {filteredLibrary.map((entry) => (
                         <button
                           key={entry.id}
