@@ -64,20 +64,15 @@ export default function Header() {
   const avatarUrl = user?.user_metadata?.avatar_url;
   const initials = fullName.split(" ").map((name: string) => name[0]).join("").toUpperCase().slice(0, 2);
 
-  async function handleSignedIn() {
+  function handleSignedIn() {
     setAuthMode(null);
     if (pendingInvite) {
       router.push(`/org/invite?token=${encodeURIComponent(pendingInvite)}`);
       return;
     }
-    const { data: { user: signedInUser } } = await supabase.auth.getUser();
-    if (signedInUser) {
-      const { data: memberships } = await supabase.from("organization_members").select("org_id").eq("user_id", signedInUser.id).limit(1);
-      if (!memberships || memberships.length === 0) {
-        router.push("/welcome");
-        return;
-      }
-    }
+    // Whether this user has an org yet is OrgProvider's job (it's already
+    // re-fetching off the same sign-in event) — /dashboard sends no-org users
+    // on to /welcome itself rather than this needing its own lookup.
     router.push(pendingNext ?? "/dashboard");
   }
 

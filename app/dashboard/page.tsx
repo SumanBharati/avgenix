@@ -52,7 +52,7 @@ const allTools: { name: string; icon: React.ReactNode; href: string }[] = [
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { activeOrg, loading: orgLoading } = useOrg();
+  const { activeOrg, loading: orgLoading, accessStatus } = useOrg();
   const [showNewProject, setShowNewProject] = useState(false);
   const [search, setSearch] = useState("");
   const [projectCount, setProjectCount] = useState(0);
@@ -66,6 +66,13 @@ export default function DashboardPage() {
   useEffect(() => {
     setRecentToolHrefs(getRecentTools());
   }, []);
+
+  // A signed-in user with no org yet (fresh signup) lands here straight from
+  // the auth modal; without this they'd be stuck on the skeleton forever,
+  // since the project-loading effect below never runs without an activeOrg.
+  useEffect(() => {
+    if (accessStatus === "no_org") router.replace("/welcome");
+  }, [accessStatus, router]);
 
   useEffect(() => {
     if (orgLoading || !activeOrg) return;
