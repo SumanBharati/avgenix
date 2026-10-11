@@ -127,6 +127,20 @@ interface PlacedDevice extends DeviceCatalogItem {
   // to the side by default); the two views have no reason to share one
   // dragged position.
   calloutElevDx?: number; calloutElevDy?: number;
+  // Where the elevation callout's leader touches the device, as fractions of
+  // its box (0..1, always on the outline); absent = top center.
+  calloutElevAx?: number; calloutElevAy?: number;
+  // Plan/Ceiling callout anchor on the device's footprint outline, in the
+  // device's local frame normalized to -1..1 (see calloutShape); absent =
+  // where the line toward the label crosses the outline.
+  calloutAx?: number; calloutAy?: number;
+  // Per-device toggles for the elevation's automatic dimensions (set from
+  // the elevation right-click menu); absent = shown.
+  hideElevDimLeft?: boolean; hideElevDimRight?: boolean; hideElevDimBottom?: boolean;
+  // Dragged positions of those dims, in feet relative to the device so they
+  // move with it: left/right = vertical offset from the device's center
+  // height; bottom = horizontal offset of the vertical dim from its center.
+  elevDimLeftDz?: number; elevDimRightDz?: number; elevDimBottomDu?: number;
   // Equipment spec fields, editable via the same "Edit Equipment" form used
   // by Signal Flow Builder/Rack Planner — mostly informational for a floor
   // plan (this tool has no cabling/rack concept of its own), kept here only
@@ -141,6 +155,59 @@ interface PlacedDevice extends DeviceCatalogItem {
   width_in?: number | null; height_in?: number | null; depth_in?: number | null; weight_lb?: number | null;
   diameter_in?: number | null;
 }
+
+// Table resize grips: 4 edges stretch one axis, 4 corners (AutoCAD-style
+// grips) stretch both. sx/sy = which way positive drag grows the table.
+type TableResizeEdge = "left" | "right" | "top" | "bottom" | "tl" | "tr" | "bl" | "br";
+const TABLE_RESIZE_DIRS: Record<TableResizeEdge, { sx: -1 | 0 | 1; sy: -1 | 0 | 1; cursor: string }> = {
+  left: { sx: -1, sy: 0, cursor: "ew-resize" },
+  right: { sx: 1, sy: 0, cursor: "ew-resize" },
+  top: { sx: 0, sy: -1, cursor: "ns-resize" },
+  bottom: { sx: 0, sy: 1, cursor: "ns-resize" },
+  tl: { sx: -1, sy: -1, cursor: "nwse-resize" },
+  br: { sx: 1, sy: 1, cursor: "nwse-resize" },
+  tr: { sx: 1, sy: -1, cursor: "nesw-resize" },
+  bl: { sx: -1, sy: 1, cursor: "nesw-resize" },
+};
+
+// Plan/Ceiling callout anchor geometry. A shape is a device's footprint in
+// screen px around its center; an anchor is stored as (ax, ay) in the
+// shape's local frame, normalized to -1..1, and always lies on the outline.
+type CalloutShape = { kind: "rect"; hw: number; hh: number; angle: number } | { kind: "circle"; r: number };
+type CalloutGeom = { shape: CalloutShape; cx: number; cy: number; anchorPx: number; anchorPy: number; dxFt: number; dyFt: number; scale: number };
+const calloutAnchorPoint = (s: CalloutShape, cx: number, cy: number, ax: number, ay: number) => {
+  if (s.kind === "circle") {
+    const len = Math.hypot(ax, ay);
+    if (len < 1e-6) return { x: cx, y: cy - s.r };
+    return { x: cx + ax / len * s.r, y: cy + ay / len * s.r };
+  }
+  const a = s.angle * Math.PI / 180, lx = ax * s.hw, ly = ay * s.hh;
+  return { x: cx + lx * Math.cos(a) - ly * Math.sin(a), y: cy + lx * Math.sin(a) + ly * Math.cos(a) };
+};
+// Nearest point on the outline to (px, py), as normalized local coords.
+const snapCalloutAnchor = (s: CalloutShape, cx: number, cy: number, px: number, py: number) => {
+  if (s.kind === "circle") {
+    const dx = px - cx, dy = py - cy, len = Math.hypot(dx, dy);
+    return len < 1e-6 ? { ax: 0, ay: -1 } : { ax: dx / len, ay: dy / len };
+  }
+  const a = s.angle * Math.PI / 180, dx = px - cx, dy = py - cy;
+  let ax = Math.max(-1, Math.min(1, (dx * Math.cos(a) + dy * Math.sin(a)) / s.hw));
+  let ay = Math.max(-1, Math.min(1, (-dx * Math.sin(a) + dy * Math.cos(a)) / s.hh));
+  const gaps = [(1 + ax) * s.hw, (1 - ax) * s.hw, (1 + ay) * s.hh, (1 - ay) * s.hh];
+  const i = gaps.indexOf(Math.min(...gaps));
+  if (i === 0) ax = -1; else if (i === 1) ax = 1; else if (i === 2) ay = -1; else ay = 1;
+  return { ax, ay };
+};
+// Default anchor: where the ray from the center toward (tx, ty) exits the outline.
+const defaultCalloutAnchor = (s: CalloutShape, cx: number, cy: number, tx: number, ty: number) => {
+  const dx = tx - cx, dy = ty - cy;
+  if (Math.hypot(dx, dy) < 1e-6) return { ax: 0, ay: -1 };
+  if (s.kind === "circle") return snapCalloutAnchor(s, cx, cy, tx, ty);
+  const a = s.angle * Math.PI / 180;
+  const lx = dx * Math.cos(a) + dy * Math.sin(a), ly = -dx * Math.sin(a) + dy * Math.cos(a);
+  const t = 1 / Math.max(Math.abs(lx) / s.hw, Math.abs(ly) / s.hh);
+  return { ax: lx * t / s.hw, ay: ly * t / s.hh };
+};
 
 // Revit-style "Elevation Marker" — a placeable, rotatable tag dropped
 // anywhere in the plan. It doesn't carry equipment of its own; it just
@@ -260,6 +327,15 @@ function applyFormValueToDevice(d: PlacedDevice, v: EquipmentFormValue): PlacedD
 // Designer's rd_* placement metadata). Used both for the library search
 // dropdown and — because a Kit's own component products need the exact same
 // shape — for expanding a Kit pick into its individual parts.
+// Drawn size (feet) for a library pick: the product's own W / H spec wins
+// when entered; otherwise the rd_* / inferred placement size is kept.
+function specSizeFt(sel: any, w: number, h: number) {
+  return {
+    w: sel?.width_in > 0 ? sel.width_in / 12 : w,
+    h: sel?.height_in > 0 ? sel.height_in / 12 : h,
+  };
+}
+
 function productToModalResult(p: any) {
   return {
     ...p,
@@ -417,7 +493,7 @@ export default function RoomDesignerPage() {
   const [modalDeviceName, setModalDeviceName] = useState("");
   const [modalMake,     setModalMake]     = useState("");
   const [modalModel,    setModalModel]    = useState("");
-  const [deviceContextMenu, setDeviceContextMenu] = useState<{x:number;y:number;uid:number}|null>(null);
+  const [deviceContextMenu, setDeviceContextMenu] = useState<{x:number;y:number;uid:number;fromElevation?:boolean}|null>(null);
   const [rotatePopup, setRotatePopup] = useState<{x:number;y:number;uid:number;value:string}|null>(null);
   const [editingDevice, setEditingDevice] = useState<PlacedDevice|null>(null);
   const [showTable,     setShowTable]     = useState(false);
@@ -481,7 +557,9 @@ export default function RoomDesignerPage() {
   const [tableRotCenter, setTableRotCenter] = useState<{x:number;y:number}|null>(null);
   const [chairOffsets,  setChairOffsets]  = useState<Record<number,{dx:number;dy:number}>>({});
   // Table edge resize drag
-  const [tableResizeDrag, setTableResizeDrag] = useState<{edge:"left"|"right"|"top"|"bottom";startSvgX:number;startSvgY:number;origWidth:number;origLength:number;origSeats:number}|null>(null);
+  const [showCeilingGrid, setShowCeilingGrid] = useState(true);
+  const [furnitureResizeDrag, setFurnitureResizeDrag] = useState<{uid:number;corner:TableResizeEdge;startX:number;startY:number;origW:number;origH:number;origX:number;origY:number;rotDeg:number}|null>(null);
+  const [tableResizeDrag, setTableResizeDrag] = useState<{edge:TableResizeEdge;startSvgX:number;startSvgY:number;origWidth:number;origLength:number;origSeats:number}|null>(null);
   // Multi-item drag
   const [multiDrag,     setMultiDrag]     = useState<{startSvgX:number;startSvgY:number;origTableCX:number;origWallDist:number;origChairOffsets:Record<number,{dx:number;dy:number}>;items:Set<string>;origDevs:{uid:number;x:number;y:number}[]}|null>(null);
 
@@ -636,13 +714,24 @@ export default function RoomDesignerPage() {
   // Double-click the bottom-of-equipment dimension label to type an exact
   // mount height instead of dragging for it — same inline-edit convention as
   // the wall-length editor below.
-  const [editingElevDimUid, setEditingElevDimUid] = useState<number | null>(null);
+  // "left"/"right" are the horizontal center-of-device-to-wall-edge dims;
+  // they carry the view's geometry so the commit can move the device along
+  // that view's own left-right axis (keeping it on its wall).
+  const [editingElevDim, setEditingElevDim] = useState<
+    | { uid: number; field: "bottom" }
+    | { uid: number; field: "left" | "right"; u: number; wallWidthFt: number; perpX: number; perpY: number }
+    | null>(null);
   const [elevDimInput, setElevDimInput] = useState("");
+  const [elevCalloutAnchorDrag, setElevCalloutAnchorDrag] = useState<{ uid: number; boxL: number; boxT: number; boxW: number; boxH: number } | null>(null);
+  const [elevDimDrag, setElevDimDrag] = useState<{
+    uid: number; key: "elevDimLeftDz" | "elevDimRightDz" | "elevDimBottomDu";
+    startSvgX: number; startSvgY: number; orig: number; min: number; max: number;
+  } | null>(null);
   const elevDimInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (editingElevDimUid === null) return;
+    if (editingElevDim === null) return;
     requestAnimationFrame(() => { elevDimInputRef.current?.focus(); elevDimInputRef.current?.select(); });
-  }, [editingElevDimUid]);
+  }, [editingElevDim]);
 
   const svgRef = useRef<SVGSVGElement>(null);
   // The Elevations pane's own px/ft scale (`eScale`, computed per-render from
@@ -1205,6 +1294,7 @@ export default function RoomDesignerPage() {
         devType = "speaker"; wall = "ceiling"; icon = "🔊"; color = "#ef4444"; w = 0.3; h = 0.3;
       }
     }
+    ({ w, h } = specSizeFt(sel, w, h));
     pushUndo();
     setPlacedDevices(prev => prev.map(d => d.uid === uid ? {
       ...d,
@@ -1503,6 +1593,7 @@ export default function RoomDesignerPage() {
         devType = "speaker"; wall = "ceiling"; icon = "🔊"; color = "#ef4444"; w = 0.3; h = 0.3;
       }
     }
+    ({ w, h } = specSizeFt(sel, w, h));
     addDeviceToRoom({
       id: `modal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, icon, w, h, wall, type: devType, color,
       hfovDeg: sel?.hfov_deg ?? null,
@@ -1982,23 +2073,32 @@ export default function RoomDesignerPage() {
     setElevCalloutDrag({ uid, startSvgX: svgP.x, startSvgY: svgP.y, origDxFt: dxFt, origDyFt: dyFt });
   };
   const commitElevDimEdit = (closeOnInvalid = false) => {
-    if (editingElevDimUid === null) return;
+    const edit = editingElevDim;
+    if (edit === null) return;
     const value = parseFtIn(elevDimInput);
     if (value === null || value < 0) {
-      if (closeOnInvalid) { setEditingElevDimUid(null); setElevDimInput(""); }
+      if (closeOnInvalid) { setEditingElevDim(null); setElevDimInput(""); }
       return;
     }
-    const uid = editingElevDimUid;
     pushUndo();
     setPlacedDevices(prev => prev.map(d => {
-      if (d.uid !== uid) return d;
-      const half = (d.h || 0.5) / 2;
-      // `value` is the bottom-of-equipment height typed in; z is stored as
-      // the device's vertical center, so add back the half-height offset.
-      const newZ = Math.max(half, Math.min(roomH - half, value + half));
-      return { ...d, z: newZ };
+      if (d.uid !== edit.uid) return d;
+      if (edit.field === "bottom") {
+        const half = (d.h || 0.5) / 2;
+        // `value` is the bottom-of-equipment height typed in; z is stored as
+        // the device's vertical center, so add back the half-height offset.
+        const newZ = Math.max(half, Math.min(roomH - half, value + half));
+        return { ...d, z: newZ };
+      }
+      const targetU = Math.max(0, Math.min(edit.wallWidthFt, edit.field === "left" ? value : edit.wallWidthFt - value));
+      const delta = targetU - edit.u;
+      return {
+        ...d,
+        x: Math.max(cMinX, Math.min(cMaxX, d.x + delta * edit.perpX)),
+        y: Math.max(cMinY, Math.min(cMaxY, d.y + delta * edit.perpY)),
+      };
     }));
-    setEditingElevDimUid(null);
+    setEditingElevDim(null);
     setElevDimInput("");
   };
 
@@ -2280,7 +2380,7 @@ export default function RoomDesignerPage() {
     if (wallStretchDrag) setWallStretchDrag(null);
     setTrackGuides([]); setWallSnapPoint(null);
     freeDragPos.current = null;
-    setDragUid(null); setDragStart(null); setWallDragEdge(null); setWallDragStart(null); setWallDragged(false); setMultiDrag(null); setTableResizeDrag(null); setDoorDragId(null); setDoorDragStart(null); setRotDragUid(null); setRotDragCenter(null); setRotatingTable(false); setTableRotCenter(null);
+    setDragUid(null); setDragStart(null); setWallDragEdge(null); setWallDragStart(null); setWallDragged(false); setMultiDrag(null); setTableResizeDrag(null); setFurnitureResizeDrag(null); setDoorDragId(null); setDoorDragStart(null); setRotDragUid(null); setRotDragCenter(null); setRotatingTable(false); setTableRotCenter(null);
   };
 
   // Dragging a callout label — kept fully independent of dragUid/dragStart
@@ -2313,14 +2413,41 @@ export default function RoomDesignerPage() {
     setCalloutDragStart({ x: svgP.x, y: svgP.y });
   };
 
+  // Dragging the callout's anchor dot along the device outline. Shares
+  // calloutDragUid with the label drag so both SVGs route moves here.
+  const calloutAnchorDrag = useRef<{
+    shape: CalloutShape; cx: number; cy: number; origAnchor: { x: number; y: number }; origDx: number; origDy: number; scale: number;
+  } | null>(null);
+  const handleCalloutAnchorMouseDown = (e: React.MouseEvent, dev: PlacedDevice, view: CalloutView, geom: CalloutGeom) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    pushUndo();
+    setSelectedUid(dev.uid); clearSelection();
+    calloutAnchorDrag.current = { shape: geom.shape, cx: geom.cx, cy: geom.cy, origAnchor: { x: geom.anchorPx, y: geom.anchorPy }, origDx: geom.dxFt, origDy: geom.dyFt, scale: geom.scale };
+    calloutDragView.current = view;
+    setCalloutDragUid(dev.uid);
+    setCalloutDragStart({ x: geom.anchorPx, y: geom.anchorPy });
+  };
+
   const handleCalloutMouseMove = (e: React.MouseEvent) => {
-    if (!calloutDragUid || !calloutDragStart || !calloutDragOrigin.current) return;
+    if (!calloutDragUid || !calloutDragStart) return;
     const view = calloutDragView.current;
     const svg = (view === "ceil" ? ceilSvgRef : svgRef).current; if (!svg) return;
     const scale = view === "ceil" ? ceilScale() : planScale;
     const pt = svg.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
     const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
+    const ad = calloutAnchorDrag.current;
+    if (ad) {
+      const snapped = snapCalloutAnchor(ad.shape, ad.cx, ad.cy, svgP.x, svgP.y);
+      const p = calloutAnchorPoint(ad.shape, ad.cx, ad.cy, snapped.ax, snapped.ay);
+      // Label keeps its offset from the anchor, so the whole callout moves.
+      const newDx = ad.origDx + (p.x - ad.origAnchor.x) / ad.scale;
+      const newDy = ad.origDy + (p.y - ad.origAnchor.y) / ad.scale;
+      setPlacedDevices(prev => prev.map(d => d.uid === calloutDragUid ? { ...d, calloutAx: snapped.ax, calloutAy: snapped.ay, calloutDx: newDx, calloutDy: newDy } : d));
+      return;
+    }
+    if (!calloutDragOrigin.current) return;
     const dxW = (svgP.x - calloutDragStart.x) / scale;
     const dyW = (svgP.y - calloutDragStart.y) / scale;
     const newDx = calloutDragOrigin.current.dx + dxW;
@@ -2329,7 +2456,24 @@ export default function RoomDesignerPage() {
   };
 
   const handleCalloutMouseUp = () => {
-    setCalloutDragUid(null); setCalloutDragStart(null); calloutDragOrigin.current = null;
+    setCalloutDragUid(null); setCalloutDragStart(null); calloutDragOrigin.current = null; calloutAnchorDrag.current = null;
+  };
+
+  // Footprint outline used to keep a callout's anchor on the device, in
+  // screen px — mirrors the sizes the plan/ceiling renderers draw each type at.
+  const calloutShape = (dev: PlacedDevice, view: CalloutView, scale: number): CalloutShape => {
+    if (view === "plan" && dev.type === "display") {
+      const angle = dev.rotation ?? ((dev.mountWall === "west" || dev.mountWall === "east") ? 90 : 0);
+      return { kind: "rect", hw: Math.max(3, dev.w * scale / 2), hh: 3, angle };
+    }
+    if (view === "plan" && dev.type === "furniture") {
+      return { kind: "rect", hw: Math.max(3, dev.w * scale / 2), hh: Math.max(3, dev.h * scale / 2), angle: dev.rotation || 0 };
+    }
+    if (view === "ceil" && dev.type === "mic") {
+      const half = Math.max(dev.w * scale, 12) / 2;
+      return { kind: "rect", hw: half, hh: half, angle: 0 };
+    }
+    return { kind: "circle", r: 7 };
   };
 
   // Renders one device's call-out: the make/model label, a short straight
@@ -2345,18 +2489,26 @@ export default function RoomDesignerPage() {
     const scale = view === "ceil" ? ceilScale() : planScale;
     const offX = view === "ceil" ? (600 - roomW * scale) / 2 : planOffX;
     const offY = view === "ceil" ? (420 - roomL * scale) / 2 : planOffY;
-    const anchorPx = offX + dev.x * scale, anchorPy = offY + (dev.y || 0.1) * scale;
+    // Label offsets are measured from the device center; the leader itself
+    // attaches to a point on the device's outline (draggable, see anchor dot).
+    const cx = offX + dev.x * scale, cy = offY + (dev.y || 0.1) * scale;
     const def = defaultCalloutOffset(dev);
     const dxFt = dev.calloutDx ?? def.dx, dyFt = dev.calloutDy ?? def.dy;
-    const labelX = anchorPx + dxFt * scale, labelY = anchorPy + dyFt * scale;
-    const side = labelX >= anchorPx ? 1 : -1;
+    const labelX = cx + dxFt * scale, labelY = cy + dyFt * scale;
+    const side = labelX >= cx ? 1 : -1;
     const elbowX = labelX - side * CALLOUT_STUB_PX, elbowY = labelY;
+    const shape = calloutShape(dev, view, scale);
+    const anchorN = dev.calloutAx !== undefined && dev.calloutAy !== undefined
+      ? { ax: dev.calloutAx, ay: dev.calloutAy }
+      : defaultCalloutAnchor(shape, cx, cy, elbowX, elbowY);
+    const { x: anchorPx, y: anchorPy } = calloutAnchorPoint(shape, cx, cy, anchorN.ax, anchorN.ay);
+    const isAnchorDragging = calloutDragUid === dev.uid && calloutAnchorDrag.current !== null;
     const label = calloutLabel(dev);
     const isSelected = selectedUid === dev.uid || selectedUids.has(dev.uid);
     return (
-      // pointerEvents="none" on the whole leader-line group (the label/handle
-      // below opt back in explicitly): the anchor dot sits at the device's
-      // own on-screen center, exactly where its icon is — undoing that would
+      // pointerEvents="none" on the whole leader-line group (the label, handle
+      // and small anchor grab target below opt back in explicitly): the leader
+      // runs right up to the device's own icon — undoing that would
       // let a purely decorative line/dot silently steal clicks meant for the
       // device underneath, since this callout's <g> is a sibling drawn in a
       // later pass, not a descendant of the device's own <g>, so the device's
@@ -2365,7 +2517,13 @@ export default function RoomDesignerPage() {
       <g key={`callout-${dev.uid}`} pointerEvents="none">
         <line x1={anchorPx} y1={anchorPy} x2={elbowX} y2={elbowY} stroke="rgb(var(--text-muted))" strokeWidth={0.6} />
         <line x1={elbowX} y1={elbowY} x2={labelX} y2={labelY} stroke="rgb(var(--text-muted))" strokeWidth={0.6} />
-        <circle cx={anchorPx} cy={anchorPy} r={1.2} fill="rgb(var(--text-muted))" />
+        <circle cx={anchorPx} cy={anchorPy} r={isAnchorDragging ? 2.2 : 1.2} fill={isAnchorDragging ? "#8b5cf6" : "rgb(var(--text-muted))"} />
+        {/* Anchor grab target: drag to move the callout around the device; it
+            snaps to the footprint outline so it stays attached. */}
+        <circle cx={anchorPx} cy={anchorPy} r={4} fill="transparent" pointerEvents="auto"
+          style={{ cursor: isAnchorDragging ? "grabbing" : "pointer" }}
+          onMouseDown={e => handleCalloutAnchorMouseDown(e, dev, view, { shape, cx, cy, anchorPx, anchorPy, dxFt, dyFt, scale })}
+          onContextMenu={e => handleDeviceContextMenu(e, dev.uid)} />
         {/* A bare <text> only hit-tests its actual glyph ink, not its logical
             bounding box, so a click landing in the gap between characters
             (or in the box's padding) falls through instead of starting a
@@ -2860,11 +3018,15 @@ export default function RoomDesignerPage() {
     }
   };
 
-  const handleDeviceContextMenu = (e: React.MouseEvent, uid: number) => {
+  const handleDeviceContextMenu = (e: React.MouseEvent, uid: number, fromElevation = false) => {
     e.preventDefault();
     e.stopPropagation();
     setSelectedUid(uid);
-    setDeviceContextMenu({x:e.clientX, y:e.clientY, uid});
+    setDeviceContextMenu({x:e.clientX, y:e.clientY, uid, fromElevation});
+  };
+  const toggleElevDim = (uid: number, key: "hideElevDimLeft" | "hideElevDimRight" | "hideElevDimBottom") => {
+    pushUndo();
+    setPlacedDevices(prev => prev.map(d => d.uid === uid ? { ...d, [key]: !d[key] } : d));
   };
 
   const duplicateDevice = (uid: number) => {
@@ -3040,7 +3202,7 @@ export default function RoomDesignerPage() {
   };
 
   // Table edge resize handlers
-  const handleTableResizeStart = (edge: "left"|"right"|"top"|"bottom", e: React.MouseEvent) => {
+  const handleTableResizeStart = (edge: TableResizeEdge, e: React.MouseEvent) => {
     e.stopPropagation();
     const svg = svgRef.current; if (!svg) return;
     const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
@@ -3055,15 +3217,34 @@ export default function RoomDesignerPage() {
     const svgP = pt.matrixTransform(svg.getScreenCTM()!.inverse());
     const dx = (svgP.x - tableResizeDrag.startSvgX) / planScale;
     const dy = (svgP.y - tableResizeDrag.startSvgY) / planScale;
-    if (tableResizeDrag.edge === "right") {
-      setTableWidth(Math.max(1, Math.min(16, tableResizeDrag.origWidth + dx * 2)));
-    } else if (tableResizeDrag.edge === "left") {
-      setTableWidth(Math.max(1, Math.min(16, tableResizeDrag.origWidth - dx * 2)));
-    } else if (tableResizeDrag.edge === "bottom") {
-      setTableLengthOverride(Math.max(1, Math.min(30, tableResizeDrag.origLength + dy * 2)));
-    } else if (tableResizeDrag.edge === "top") {
-      setTableLengthOverride(Math.max(1, Math.min(30, tableResizeDrag.origLength - dy * 2)));
-    }
+    const { sx, sy } = TABLE_RESIZE_DIRS[tableResizeDrag.edge];
+    if (sx) setTableWidth(Math.max(1, Math.min(16, tableResizeDrag.origWidth + sx * dx * 2)));
+    if (sy) setTableLengthOverride(Math.max(1, Math.min(30, tableResizeDrag.origLength + sy * dy * 2)));
+  };
+
+  // Placed furniture (catalog-dropped tables) corner stretch: the opposite
+  // corner stays fixed, and the drag is measured in the item's own rotated
+  // frame so grips behave the same at any rotation.
+  const handleFurnitureResizeStart = (dev: PlacedDevice, corner: TableResizeEdge, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const pos = screenToWorld(e); if (!pos) return;
+    pushUndo();
+    setFurnitureResizeDrag({ uid: dev.uid, corner, startX: pos.x, startY: pos.y, origW: dev.w, origH: dev.h, origX: dev.x, origY: dev.y, rotDeg: dev.rotation || 0 });
+  };
+  const handleFurnitureResizeMove = (e: React.MouseEvent) => {
+    const d = furnitureResizeDrag; if (!d) return;
+    const pos = screenToWorld(e); if (!pos) return;
+    const a = d.rotDeg * Math.PI / 180, cos = Math.cos(a), sin = Math.sin(a);
+    const wdx = pos.x - d.startX, wdy = pos.y - d.startY;
+    const ldx = wdx * cos + wdy * sin, ldy = -wdx * sin + wdy * cos;
+    const { sx, sy } = TABLE_RESIZE_DIRS[d.corner];
+    const MIN = 1;
+    const newW = Math.max(MIN, d.origW + sx * ldx);
+    const newH = Math.max(MIN, d.origH + sy * ldy);
+    const lcx = sx * (newW - d.origW) / 2, lcy = sy * (newH - d.origH) / 2;
+    const x = d.origX + lcx * cos - lcy * sin;
+    const y = d.origY + lcx * sin + lcy * cos;
+    setPlacedDevices(prev => prev.map(p => p.uid === d.uid ? { ...p, w: newW, h: newH, x, y } : p));
   };
 
   // Shift-aligned placement: lock the ghost onto a horizontal or vertical line through
@@ -4185,6 +4366,42 @@ export default function RoomDesignerPage() {
   const discasClosestViewerFt = Math.max(imageHeightIn * 0.87, closestByAngleIn) / 12;
   const effectiveDiscasClosestViewer = discasClosestViewerOverride ?? discasClosestViewerFt;
 
+  // ── Acceptable Audience Area (zone rectangle) ───────────────────────────
+  // Auto-drawn region on the floor plan where seating/viewers belong: the
+  // display-wall side (whichever wall is selected above in guideWall) is
+  // bounded by the AVIXA DISCAS closest-viewer distance computed just above
+  // — any closer and viewers crane their neck or oversaturate on the image —
+  // while the other three walls use a flat 36" furniture/walk clearance.
+  // Rectangular rooms only: a drawn room qualifies when every wall is
+  // axis-aligned and lies on its bounding box (so L-shapes / angled walls,
+  // which have no single N/S/E/W wall to measure from, get no zone).
+  const AUDIENCE_SIDE_CLEARANCE_FT = 36 / 12;
+  const audienceRoomBounds = (() => {
+    if (!isCustomBlank) return { minX: 0, minY: 0, maxX: roomW, maxY: roomL };
+    if (!drawnBounds) return null;
+    const EPS = 0.05;
+    const { minX, minY, maxX, maxY } = drawnBounds;
+    const isRect = drawnWalls.every(dev => {
+      const a = dev.wallAngle!;
+      const dx = Math.abs(Math.cos(a)), dy = Math.abs(Math.sin(a));
+      if (dy < 1e-3) return Math.abs(dev.y - minY) < EPS || Math.abs(dev.y - maxY) < EPS;
+      if (dx < 1e-3) return Math.abs(dev.x - minX) < EPS || Math.abs(dev.x - maxX) < EPS;
+      return false;
+    });
+    return isRect ? { minX, minY, maxX, maxY } : null;
+  })();
+  let audienceZoneRect: { x: number; y: number; w: number; h: number } | null = null;
+  if (audienceRoomBounds && validRoom && effectiveDiscasClosestViewer > 0) {
+    const { minX, minY, maxX, maxY } = audienceRoomBounds;
+    const sideClear = AUDIENCE_SIDE_CLEARANCE_FT;
+    let x0 = minX + sideClear, y0 = minY + sideClear, x1 = maxX - sideClear, y1 = maxY - sideClear;
+    if (guideWall === "north") y0 = minY + effectiveDiscasClosestViewer;
+    else if (guideWall === "south") y1 = maxY - effectiveDiscasClosestViewer;
+    else if (guideWall === "west") x0 = minX + effectiveDiscasClosestViewer;
+    else if (guideWall === "east") x1 = maxX - effectiveDiscasClosestViewer;
+    if (x1 > x0 && y1 > y0) audienceZoneRect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
   // ── Camera Guide ───────────────────────────────────────────────────────
   const chairMargin = 1;  // 1 foot chair margin
   const seatingWidth = !validRoom ? 0
@@ -4386,7 +4603,14 @@ export default function RoomDesignerPage() {
     };
 
     // Table edge resize handles (rendered on top of table body)
-    const renderTableResizeHandles = (x1: number, y1: number, w: number, h: number) => (
+    const renderTableResizeHandles = (x1: number, y1: number, w: number, h: number, withCorners = true) => {
+      const tSel = isItemSelected("table");
+      const GRIP = 7, HIT = 12;
+      const corners: { edge: TableResizeEdge; x: number; y: number }[] = [
+        { edge: "tl", x: x1, y: y1 }, { edge: "tr", x: x1 + w, y: y1 },
+        { edge: "bl", x: x1, y: y1 + h }, { edge: "br", x: x1 + w, y: y1 + h },
+      ];
+      return (
       <g>
         {/* Left edge */}
         <line x1={pX(x1)} y1={pY(y1)} x2={pX(x1)} y2={pY(y1+h)} stroke="transparent" strokeWidth={8} cursor="ew-resize"
@@ -4413,8 +4637,22 @@ export default function RoomDesignerPage() {
         {tableResizeDrag?.edge === "right" && <line x1={pX(x1+w)} y1={pY(y1)} x2={pX(x1+w)} y2={pY(y1+h)} stroke="#8b5cf6" strokeWidth={3} pointerEvents="none" />}
         {tableResizeDrag?.edge === "top" && <line x1={pX(x1)} y1={pY(y1)} x2={pX(x1+w)} y2={pY(y1)} stroke="#8b5cf6" strokeWidth={3} pointerEvents="none" />}
         {tableResizeDrag?.edge === "bottom" && <line x1={pX(x1)} y1={pY(y1+h)} x2={pX(x1+w)} y2={pY(y1+h)} stroke="#8b5cf6" strokeWidth={3} pointerEvents="none" />}
+        {/* Corner grips — rendered last so they win over the edge hit lines */}
+        {withCorners && corners.map(c => {
+          const active = tableResizeDrag?.edge === c.edge;
+          return (
+            <g key={c.edge} cursor={TABLE_RESIZE_DIRS[c.edge].cursor} onMouseDown={e => handleTableResizeStart(c.edge, e)}
+              onMouseEnter={e => { const g = e.currentTarget.querySelector("[data-grip]"); g?.setAttribute("fill", "#8b5cf6"); g?.setAttribute("opacity", "1"); }}
+              onMouseLeave={e => { const g = e.currentTarget.querySelector("[data-grip]"); g?.setAttribute("fill", active ? "#8b5cf6" : "#fff"); g?.setAttribute("opacity", tSel || active ? "1" : "0"); }}>
+              <rect x={pX(c.x) - HIT / 2} y={pY(c.y) - HIT / 2} width={HIT} height={HIT} fill="transparent" />
+              <rect data-grip x={pX(c.x) - GRIP / 2} y={pY(c.y) - GRIP / 2} width={GRIP} height={GRIP}
+                fill={active ? "#8b5cf6" : "#fff"} stroke="#8b5cf6" strokeWidth={1.25} opacity={tSel || active ? 1 : 0} pointerEvents="none" />
+            </g>
+          );
+        })}
       </g>
-    );
+      );
+    };
 
     if(tableShape==="round"){
       const r=Math.max(tW,tL)/2;
@@ -4447,7 +4685,7 @@ export default function RoomDesignerPage() {
             );
             return renderSelectableChair(i, chairEl, chairX, chairY);
           })}
-          {!tableDeleted && renderTableResizeHandles(cx - r, cy2 - r, r * 2, r * 2)}
+          {!tableDeleted && renderTableResizeHandles(cx - r, cy2 - r, r * 2, r * 2, false)}
         </g>
       );
     }
@@ -5010,8 +5248,8 @@ export default function RoomDesignerPage() {
         <div style={{width:`${floorCeilSplit*100}%`,position:"relative",overflow:"hidden"}}>
         <div ref={canvasContainerRef} data-rd-canvas="plan" style={{position:"absolute",inset:0,background:cc.card,overflow:"hidden"}}>
         <svg ref={svgRef} width="100%" height="100%" viewBox={`${300-300/zoom-pan.x} ${210-210/zoom-pan.y} ${600/zoom} ${420/zoom}`}
-          style={{background:cc.card,userSelect:"none",cursor:placingElevationMarker?"crosshair":(annotate.activeTool&&!isDrawingWall?annotate.cursor:null)||(isDrawingWall?"crosshair":isPanning?"grabbing":moveDragStart?"grabbing":wallStretchDrag?"move":dragUid?"grabbing":multiDrag?"grabbing":tableResizeDrag?(tableResizeDrag.edge==="left"||tableResizeDrag.edge==="right"?"ew-resize":"ns-resize"):wallDragEdge?(wallDragEdge==="east"||wallDragEdge==="west"?"ew-resize":"ns-resize"):moveMode?"move":panMode?"grab":"default")}}
-          onMouseMove={e=>{if(elevMarkerDrag){handleElevMarkerMouseMove(e);return;}if((annotate.activeTool&&!isDrawingWall)||annotate.isDragging()){annotate.handleMove(e);return;}if(moveDragStart){handleMoveDrag(e);return;}handleRotDragMove(e);handleTableRotDragMove(e);handleNewDeviceDrag(e);handleNewChairDrag(e);handleNewTableDrag(e);handleNewDoorDrag(e);handleDoorDragMove(e);handleTableResizeMove(e);handleMultiDragMove(e);handleWallEdgeDrag(e);handleWallStretchMove(e);handleWallMouseMove(e);if(isPanning){const dx=(e.clientX-panStart.x)/zoom;const dy=(e.clientY-panStart.y)/zoom;setPan({x:panStart.px+dx,y:panStart.py+dy});return;}handleSvgMouseMove(e);handleCalloutMouseMove(e);handleMarqueeMove(e);}}
+          style={{background:cc.card,userSelect:"none",cursor:placingElevationMarker?"crosshair":(annotate.activeTool&&!isDrawingWall?annotate.cursor:null)||(isDrawingWall?"crosshair":isPanning?"grabbing":moveDragStart?"grabbing":wallStretchDrag?"move":dragUid?"grabbing":multiDrag?"grabbing":tableResizeDrag?TABLE_RESIZE_DIRS[tableResizeDrag.edge].cursor:furnitureResizeDrag?TABLE_RESIZE_DIRS[furnitureResizeDrag.corner].cursor:wallDragEdge?(wallDragEdge==="east"||wallDragEdge==="west"?"ew-resize":"ns-resize"):moveMode?"move":panMode?"grab":"default")}}
+          onMouseMove={e=>{if(elevMarkerDrag){handleElevMarkerMouseMove(e);return;}if((annotate.activeTool&&!isDrawingWall)||annotate.isDragging()){annotate.handleMove(e);return;}if(moveDragStart){handleMoveDrag(e);return;}handleRotDragMove(e);handleTableRotDragMove(e);handleNewDeviceDrag(e);handleNewChairDrag(e);handleNewTableDrag(e);handleNewDoorDrag(e);handleDoorDragMove(e);handleTableResizeMove(e);handleFurnitureResizeMove(e);handleMultiDragMove(e);handleWallEdgeDrag(e);handleWallStretchMove(e);handleWallMouseMove(e);if(isPanning){const dx=(e.clientX-panStart.x)/zoom;const dy=(e.clientY-panStart.y)/zoom;setPan({x:panStart.px+dx,y:panStart.py+dy});return;}handleSvgMouseMove(e);handleCalloutMouseMove(e);handleMarqueeMove(e);}}
           onMouseUp={()=>{if(elevMarkerDrag){handleElevMarkerMouseUp();return;}if((annotate.activeTool&&!isDrawingWall)||annotate.isDragging()){annotate.handleUp();return;}if(moveDragStart){setMoveDragStart(null);return;}if(isPanning){setIsPanning(false);return;}handleMarqueeUp();handleSvgMouseUp();handleCalloutMouseUp();}}
           onMouseLeave={()=>{if(elevMarkerDrag){handleElevMarkerMouseUp();return;}if(annotate.isDragging()){annotate.handleLeave();return;}annotate.handleLeave();if(moveDragStart){setMoveDragStart(null);return;}if(isPanning){setIsPanning(false);return;}handleMarqueeUp();handleSvgMouseUp();handleCalloutMouseUp();}}
           onDoubleClick={e=>{if(annotate.activeTool&&!isDrawingWall){annotate.handleDoubleClick(e);}}}
@@ -5069,6 +5307,37 @@ export default function RoomDesignerPage() {
                   />
                 );
               })()}
+              {/* Acceptable Audience Area — auto-derived from the Display
+                  Size Guide's selected wall + DISCAS closest-viewer distance
+                  (display-wall side) and a flat 36" clearance (other three
+                  walls). See audienceZoneRect above; rendered under
+                  furniture/devices so a placed table/chairs read as the
+                  foreground. */}
+              {audienceZoneRect && (
+                <g pointerEvents="none">
+                  <rect
+                    x={pX(audienceZoneRect.x)}
+                    y={pY(audienceZoneRect.y)}
+                    width={audienceZoneRect.w * planScale}
+                    height={audienceZoneRect.h * planScale}
+                    fill="#38bdf8"
+                    fillOpacity={0.06}
+                    stroke="#38bdf8"
+                    strokeWidth={1.25}
+                    strokeDasharray="6 4"
+                  />
+                  <text
+                    x={pX(audienceZoneRect.x + audienceZoneRect.w / 2)}
+                    y={pY(audienceZoneRect.y + audienceZoneRect.h / 2)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fontSize={9}
+                    fontFamily="'JetBrains Mono',monospace"
+                    fill="#38bdf8"
+                    opacity={0.75}
+                  >Acceptable Audience Area</text>
+                </g>
+              )}
               {!isCustomBlank ? (
                 <g clipPath="url(#roomClip)">
                 </g>
@@ -5909,6 +6178,21 @@ export default function RoomDesignerPage() {
                       {dev.id === "round-table"
                         ? <ellipse cx={fpx} cy={fpy} rx={fw/2} ry={fh/2} fill="#cbd5e1" fillOpacity={0.3} stroke={isSelected?"#8b5cf6":"rgb(var(--text-muted))"} strokeWidth={1}/>
                         : <rect x={fpx-fw/2} y={fpy-fh/2} width={fw} height={fh} rx={2} fill="#cbd5e1" fillOpacity={0.3} stroke={isSelected?"#8b5cf6":"rgb(var(--text-muted))"} strokeWidth={1}/>}
+                      {/* Corner stretch grips (AutoCAD-style) */}
+                      {(["tl","tr","bl","br"] as const).map(c => {
+                        const { sx, sy } = TABLE_RESIZE_DIRS[c];
+                        const gx = fpx + sx * fw / 2, gy = fpy + sy * fh / 2;
+                        const active = furnitureResizeDrag?.uid === dev.uid && furnitureResizeDrag.corner === c;
+                        const shown = isSelected || active;
+                        return (
+                          <g key={c} cursor={TABLE_RESIZE_DIRS[c].cursor} onMouseDown={e => handleFurnitureResizeStart(dev, c, e)}
+                            onMouseEnter={e => { const g = e.currentTarget.querySelector("[data-grip]"); g?.setAttribute("fill", "#8b5cf6"); g?.setAttribute("opacity", "1"); }}
+                            onMouseLeave={e => { const g = e.currentTarget.querySelector("[data-grip]"); g?.setAttribute("fill", active ? "#8b5cf6" : "#fff"); g?.setAttribute("opacity", shown ? "1" : "0"); }}>
+                            <rect x={gx - 6} y={gy - 6} width={12} height={12} fill="transparent" />
+                            <rect data-grip x={gx - 3.5} y={gy - 3.5} width={7} height={7} fill={active ? "#8b5cf6" : "#fff"} stroke="#8b5cf6" strokeWidth={1.25} opacity={shown ? 1 : 0} pointerEvents="none" />
+                          </g>
+                        );
+                      })}
                     </g>
                     {dev.id !== "conf-table" && dev.id !== "round-table" && <text x={fpx} y={fpy+3} textAnchor="middle" fontSize={7} fill="rgb(var(--text-muted))">{dev.name}</text>}
                     {isSelected && (
@@ -6895,8 +7179,30 @@ export default function RoomDesignerPage() {
             // Speakers, Ceiling Microphones); the per-type branches below
             // already handled mic/camera/fallback rendering.
             const ceilingDevices = placedDevices.filter(d => d.wall === "ceiling" || d.mountWall === "ceiling");
+            // Standard 2'×2' acoustic ceiling grid, centered on the room so the
+            // border tiles on opposite walls come out equal (the usual RCP layout).
+            const CEILING_TILE_FT = 2;
+            const gridBounds = !isCustomBlank ? { minX: 0, minY: 0, maxX: roomW, maxY: roomL }
+              : drawnBounds ? { minX: drawnBounds.minX, minY: drawnBounds.minY, maxX: drawnBounds.maxX, maxY: drawnBounds.maxY } : null;
+            const gridLines = (min: number, max: number) => {
+              const mid = (min + max) / 2, out: number[] = [];
+              for (let v = mid - Math.floor((mid - min) / CEILING_TILE_FT) * CEILING_TILE_FT; v < max - 1e-6; v += CEILING_TILE_FT) {
+                if (v > min + 1e-6) out.push(v);
+              }
+              return out;
+            };
             return (
               <g>
+                {showCeilingGrid && gridBounds && (
+                  <g pointerEvents="none" stroke="rgb(var(--text-faint))" strokeWidth={0.5} opacity={0.45}>
+                    {gridLines(gridBounds.minX, gridBounds.maxX).map(x => (
+                      <line key={"cgx"+x} x1={cpX(x)} y1={cpY(gridBounds.minY)} x2={cpX(x)} y2={cpY(gridBounds.maxY)} />
+                    ))}
+                    {gridLines(gridBounds.minY, gridBounds.maxY).map(y => (
+                      <line key={"cgy"+y} x1={cpX(gridBounds.minX)} y1={cpY(y)} x2={cpX(gridBounds.maxX)} y2={cpY(y)} />
+                    ))}
+                  </g>
+                )}
                 {!isCustomBlank && (<>
                   {/* Room outline */}
                   <rect x={cpX(0)} y={cpY(0)} width={roomW*cScale} height={roomL*cScale} fill="none" stroke="#b0b5be" strokeWidth={2}/>
@@ -7045,7 +7351,16 @@ export default function RoomDesignerPage() {
         </svg>
         {/* Ceiling height control — lives here rather than on Floor Plan
             since it's specifically the Ceiling Plan's own dimension. */}
-        <div className="rd-print-hide" style={{position:"absolute",bottom:12,right:60,display:"flex",alignItems:"center",gap:4,background:cc.panel,borderRadius:6,border:"1px solid rgb(var(--border))",padding:"5px 8px"}}>
+        <div className="rd-print-hide" style={{position:"absolute",bottom:12,right:60,display:"flex",alignItems:"center",gap:6}}>
+        <button type="button" role="switch" aria-checked={showCeilingGrid} onClick={()=>setShowCeilingGrid(v=>!v)}
+          title={showCeilingGrid ? "Hide standard 2×2 ceiling grid" : "Show standard 2×2 ceiling grid"}
+          style={{display:"flex",alignItems:"center",gap:6,background:cc.panel,borderRadius:6,border:"1px solid rgb(var(--border))",padding:"5px 8px",cursor:"pointer"}}>
+          <span style={{position:"relative",width:22,height:12,borderRadius:6,background:showCeilingGrid?"#8b5cf6":"rgb(var(--border))",transition:"background 0.15s",flexShrink:0}}>
+            <span style={{position:"absolute",top:2,left:showCeilingGrid?12:2,width:8,height:8,borderRadius:"50%",background:"#fff",transition:"left 0.15s"}}/>
+          </span>
+          <span style={{fontSize:10,color:"rgb(var(--text-subtle))",whiteSpace:"nowrap"}}>Standard 2×2 Ceiling</span>
+        </button>
+        <div style={{display:"flex",alignItems:"center",gap:4,background:cc.panel,borderRadius:6,border:"1px solid rgb(var(--border))",padding:"5px 8px"}}>
           <span style={{fontSize:10,color:"rgb(var(--text-subtle))",whiteSpace:"nowrap"}}>Ceiling</span>
           <input type="number" className="no-spin" step={1} value={Math.floor(roomH)}
             onChange={e=>{const v=parseInt(e.target.value); if(!isNaN(v)) setRoomH(v + (roomH - Math.floor(roomH)))}}
@@ -7061,6 +7376,7 @@ export default function RoomDesignerPage() {
             onFocus={e=>e.target.style.borderColor="#8b5cf6"}
           />
           <span style={{fontSize:10,color:"rgb(var(--text-subtle))"}}>in</span>
+        </div>
         </div>
         {/* Ceiling zoom controls */}
         {zoomCluster("ceil")}
@@ -7125,6 +7441,41 @@ export default function RoomDesignerPage() {
             }));
             return true;
           };
+          const elevSvgPoint = (e: React.MouseEvent) => {
+            const svg = elevSvgRef.current; if (!svg) return null;
+            const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+            return pt.matrixTransform(svg.getScreenCTM()!.inverse());
+          };
+          const beginElevDimDrag = (uid: number, key: "elevDimLeftDz" | "elevDimRightDz" | "elevDimBottomDu", orig: number, min: number, max: number, e: React.MouseEvent) => {
+            if (e.button !== 0 || annotate.activeTool) return;
+            e.stopPropagation();
+            const p = elevSvgPoint(e); if (!p) return;
+            pushUndo();
+            setElevDimDrag({ uid, key, startSvgX: p.x, startSvgY: p.y, orig, min, max });
+          };
+          const updateElevDimDrag = (e: React.MouseEvent) => {
+            if (!elevDimDrag) return false;
+            const p = elevSvgPoint(e); if (!p) return true;
+            const d = elevDimDrag;
+            // Bottom dim slides along the wall (screen x); left/right slide in height (screen y, up = +z).
+            const delta = d.key === "elevDimBottomDu" ? (p.x - d.startSvgX) / eScale : -(p.y - d.startSvgY) / eScale;
+            const v = Math.max(d.min, Math.min(d.max, d.orig + delta));
+            setPlacedDevices(prev => prev.map(dev => dev.uid === d.uid ? { ...dev, [d.key]: v } : dev));
+            return true;
+          };
+          const updateElevCalloutAnchorDrag = (e: React.MouseEvent) => {
+            const d = elevCalloutAnchorDrag; if (!d) return false;
+            const p = elevSvgPoint(e); if (!p) return true;
+            // Snap to the nearest point on the box outline so the leader
+            // always stays attached to the device.
+            let ax = Math.max(0, Math.min(1, (p.x - d.boxL) / Math.max(1, d.boxW)));
+            let ay = Math.max(0, Math.min(1, (p.y - d.boxT) / Math.max(1, d.boxH)));
+            const edges = [ax * d.boxW, (1 - ax) * d.boxW, ay * d.boxH, (1 - ay) * d.boxH];
+            const nearest = edges.indexOf(Math.min(...edges));
+            if (nearest === 0) ax = 0; else if (nearest === 1) ax = 1; else if (nearest === 2) ay = 0; else ay = 1;
+            setPlacedDevices(prev => prev.map(dev => dev.uid === d.uid ? { ...dev, calloutElevAx: ax, calloutElevAy: ay } : dev));
+            return true;
+          };
           const updateElevCalloutDrag = (e: React.MouseEvent) => {
             if (!elevCalloutDrag) return false;
             const svg = elevSvgRef.current; if (!svg) return true;
@@ -7149,13 +7500,15 @@ export default function RoomDesignerPage() {
               <svg ref={elevSvgRef} data-rd-canvas="elev" width="100%" height="100%" viewBox={`${300-300/elevZoom-elevPan.x} ${210-210/elevZoom-elevPan.y} ${600/elevZoom} ${420/elevZoom}`}
                 style={{background:cc.card,cursor:annotate.activeTool?(annotate.cursor||"crosshair"):isElevPanning?"grabbing":panMode?"grab":"default"}}
                 onMouseMove={e=>{
+                  if(updateElevDimDrag(e))return;
+                  if(updateElevCalloutAnchorDrag(e))return;
                   if(updateElevCalloutDrag(e))return;
                   if(updateElevItemDrag(e))return;
                   if(annotate.activeTool||annotate.isDragging()){annotate.handleMove(e);return;}
                   if(isElevPanning){const dx=(e.clientX-elevPanStart.x)/elevZoom;const dy=(e.clientY-elevPanStart.y)/elevZoom;setElevPan({x:elevPanStart.px+dx,y:elevPanStart.py+dy});}
                 }}
-                onMouseUp={()=>{if(elevCalloutDrag){setElevCalloutDrag(null);return;}if(elevItemDrag){setElevItemDrag(null);return;}if(annotate.activeTool||annotate.isDragging()){annotate.handleUp();return;}if(isElevPanning)setIsElevPanning(false);}}
-                onMouseLeave={()=>{if(elevCalloutDrag)setElevCalloutDrag(null);if(elevItemDrag)setElevItemDrag(null);annotate.handleLeave();if(isElevPanning)setIsElevPanning(false);}}
+                onMouseUp={()=>{if(elevDimDrag){setElevDimDrag(null);return;}if(elevCalloutAnchorDrag){setElevCalloutAnchorDrag(null);return;}if(elevCalloutDrag){setElevCalloutDrag(null);return;}if(elevItemDrag){setElevItemDrag(null);return;}if(annotate.activeTool||annotate.isDragging()){annotate.handleUp();return;}if(isElevPanning)setIsElevPanning(false);}}
+                onMouseLeave={()=>{if(elevDimDrag)setElevDimDrag(null);if(elevCalloutAnchorDrag)setElevCalloutAnchorDrag(null);if(elevCalloutDrag)setElevCalloutDrag(null);if(elevItemDrag)setElevItemDrag(null);annotate.handleLeave();if(isElevPanning)setIsElevPanning(false);}}
                 onMouseDown={e=>{if(annotate.activeTool&&e.button===0){annotate.handleDown(e);return;}if((e.button===1||(e.button===0&&panMode))&&!lockedViews.elev){e.preventDefault();setIsElevPanning(true);setElevPanStart({x:e.clientX,y:e.clientY,px:elevPan.x,py:elevPan.y});}}}
                 onDoubleClick={e=>{if(annotate.activeTool)annotate.handleDoubleClick(e);}}
               >
@@ -7175,11 +7528,47 @@ export default function RoomDesignerPage() {
                   // rainbow of each device's own accent color. It's the theme's
                   // body-text color (not a fixed dark grey) so it stays readable
                   // on both the light and the dark canvas.
-                  const dimX = Math.min(x0, x1) + 10;
+                  // Vertical dim's position along the wall, relative to the
+                  // device center (default: just inside the box's left edge).
+                  const bottomDu = it.dev.elevDimBottomDu ?? (-it.wFt / 2 + 10 / eScale);
+                  const dimX = ePX(it.u + bottomDu);
+                  const boxL = Math.min(x0, x1), boxR = Math.max(x0, x1);
                   const isDraggingThis = elevItemDrag?.uid === it.dev.uid;
                   const isCeiling = it.dev.wall === "ceiling" || it.dev.mountWall === "ceiling";
                   const dimMidY = (eFloorY + y1) / 2;
-                  const isEditingDim = editingElevDimUid === it.dev.uid;
+                  const editingField = editingElevDim?.uid === it.dev.uid ? editingElevDim.field : null;
+                  const isEditingDim = editingField === "bottom";
+                  const renderDimInput = (x: number, y: number, label: string) => (
+                    <foreignObject x={x} y={y} width={68} height={22} onMouseDown={e=>e.stopPropagation()}>
+                      <input
+                        ref={elevDimInputRef}
+                        value={elevDimInput}
+                        onChange={e=>setElevDimInput(e.target.value)}
+                        onBlur={()=>commitElevDimEdit(true)}
+                        onKeyDown={e=>{
+                          e.stopPropagation();
+                          if(e.key==="Enter"){e.preventDefault();commitElevDimEdit();}
+                          if(e.key==="Escape"){e.preventDefault();setEditingElevDim(null);setElevDimInput("");}
+                        }}
+                        aria-label={label}
+                        title={'Enter a distance, for example 3\' 6"'}
+                        style={{width:"100%",height:20,boxSizing:"border-box",border:"1px solid #8b5cf6",borderRadius:3,background:"rgb(var(--forge-bg))",color:"rgb(var(--text-heading))",fontFamily:"'JetBrains Mono',monospace",fontSize:9,fontWeight:600,textAlign:"left",outline:"none",padding:"1px 3px"}}
+                      />
+                    </foreignObject>
+                  );
+                  // Horizontal center-of-device to left/right wall dims, drawn
+                  // at the device's vertical center so they clear both the
+                  // bottom-height dim below and the callout above.
+                  // Each can be dragged up/down (elevDimLeftDz/RightDz, feet
+                  // from center height); an extension line ties it back to the
+                  // device center so it never floats free of the object.
+                  const centerZ = (it.boxTop + it.boxBot) / 2;
+                  const centerY = ePY(centerZ);
+                  const centerX = ePX(it.u);
+                  const hDims = ([
+                    { field: "left" as const, key: "elevDimLeftDz" as const, from: ePX(0), to: centerX, value: it.u, hidden: !!it.dev.hideElevDimLeft, dz: it.dev.elevDimLeftDz ?? 0 },
+                    { field: "right" as const, key: "elevDimRightDz" as const, from: centerX, to: ePX(elevData.wallWidthFt), value: elevData.wallWidthFt - it.u, hidden: !!it.dev.hideElevDimRight, dz: it.dev.elevDimRightDz ?? 0 },
+                  ]).filter(h => !h.hidden && h.value > 0.05);
                   // Call-out styled to match the Plan/Ceiling view's own
                   // renderCallout — leader line (diagonal stub + elbow) out to
                   // an offset label, not a bare caption glued to the box, so
@@ -7188,7 +7577,9 @@ export default function RoomDesignerPage() {
                   // it stays stable if the view's own scale changes), same as
                   // Plan — its own mousedown stops propagation so grabbing the
                   // label repositions just the callout, not the whole device.
-                  const calloutAnchorX = (x0 + x1) / 2, calloutAnchorY = y0;
+                  const boxW = boxR - boxL, boxH = Math.max(2, y1 - y0);
+                  const calloutAnchorX = boxL + (it.dev.calloutElevAx ?? 0.5) * boxW;
+                  const calloutAnchorY = y0 + (it.dev.calloutElevAy ?? 0) * boxH;
                   const calloutDxFt = it.dev.calloutElevDx ?? -16 / eScale;
                   const calloutDyFt = it.dev.calloutElevDy ?? -20 / eScale;
                   const calloutLabelX = calloutAnchorX + calloutDxFt * eScale, calloutLabelY = calloutAnchorY + calloutDyFt * eScale;
@@ -7199,11 +7590,22 @@ export default function RoomDesignerPage() {
                   return (
                     <g key={it.dev.uid}
                       style={{cursor: annotate.activeTool ? undefined : "move"}}
-                      onMouseDown={e => beginElevItemDrag(it.dev.uid, elevPerp.x, elevPerp.y, e)}>
+                      onMouseDown={e => beginElevItemDrag(it.dev.uid, elevPerp.x, elevPerp.y, e)}
+                      onContextMenu={e => handleDeviceContextMenu(e, it.dev.uid, true)}>
                       <rect x={Math.min(x0,x1)} y={y0} width={Math.abs(x1-x0)} height={Math.max(2,y1-y0)} fill="rgb(var(--text-body))" fillOpacity={isDraggingThis?0.18:0.08} stroke={isDraggingThis?"#8b5cf6":"rgb(var(--text-body))"} strokeWidth={isDraggingThis?1.8:1.2}/>
                       <line x1={calloutAnchorX} y1={calloutAnchorY} x2={calloutElbowX} y2={calloutElbowY} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>
                       <line x1={calloutElbowX} y1={calloutElbowY} x2={calloutLabelX} y2={calloutLabelY} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>
-                      <circle cx={calloutAnchorX} cy={calloutAnchorY} r={1.2} fill="rgb(var(--text-muted))"/>
+                      <circle cx={calloutAnchorX} cy={calloutAnchorY} r={elevCalloutAnchorDrag?.uid === it.dev.uid ? 2.2 : 1.2} fill={elevCalloutAnchorDrag?.uid === it.dev.uid ? "#8b5cf6" : "rgb(var(--text-muted))"}/>
+                      {/* Drag the anchor dot to move the whole callout around
+                          the device; it snaps to the outline so it stays attached. */}
+                      <circle cx={calloutAnchorX} cy={calloutAnchorY} r={5} fill="transparent"
+                        style={{cursor: elevCalloutAnchorDrag ? "grabbing" : "pointer"}}
+                        onMouseDown={e => {
+                          if (e.button !== 0 || annotate.activeTool) return;
+                          e.stopPropagation();
+                          pushUndo();
+                          setElevCalloutAnchorDrag({ uid: it.dev.uid, boxL, boxT: y0, boxW, boxH });
+                        }}/>
                       {/* Invisible padded rect widens the draggable area to the
                           label's full apparent extent, same as Plan's own
                           callout hit-box — a bare <text> only hit-tests ink. */}
@@ -7219,40 +7621,62 @@ export default function RoomDesignerPage() {
                           Double-click the label to type an exact height instead
                           of dragging for it (skipped for ceiling-mounted items,
                           which don't have an independently settable height). */}
-                      {it.boxBot > 0.05 && (
+                      {it.boxBot > 0.05 && !it.dev.hideElevDimBottom && (
                         <g onMouseDown={e=>e.stopPropagation()}>
                           <line x1={dimX} y1={eFloorY} x2={dimX} y2={y1} stroke="rgb(var(--text-muted))" strokeWidth={1}/>
                           <path d={`M${dimX-3},${eFloorY-6} L${dimX},${eFloorY} L${dimX+3},${eFloorY-6}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
                           <path d={`M${dimX-3},${y1+6} L${dimX},${y1} L${dimX+3},${y1+6}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
-                          {isEditingDim ? (
-                            <foreignObject x={dimX+5} y={dimMidY-11} width={68} height={22} onMouseDown={e=>e.stopPropagation()}>
-                              <input
-                                ref={elevDimInputRef}
-                                value={elevDimInput}
-                                onChange={e=>setElevDimInput(e.target.value)}
-                                onBlur={()=>commitElevDimEdit(true)}
-                                onKeyDown={e=>{
-                                  e.stopPropagation();
-                                  if(e.key==="Enter"){e.preventDefault();commitElevDimEdit();}
-                                  if(e.key==="Escape"){e.preventDefault();setEditingElevDimUid(null);setElevDimInput("");}
-                                }}
-                                aria-label="Bottom of equipment height"
-                                title={'Enter a height, for example 3\' 6"'}
-                                style={{width:"100%",height:20,boxSizing:"border-box",border:"1px solid #8b5cf6",borderRadius:3,background:"rgb(var(--forge-bg))",color:"rgb(var(--text-heading))",fontFamily:"'JetBrains Mono',monospace",fontSize:9,fontWeight:600,textAlign:"left",outline:"none",padding:"1px 3px"}}
-                              />
-                            </foreignObject>
-                          ) : (
+                          {dimX < boxL - 0.5 && <line x1={boxL} y1={y1} x2={dimX-3} y2={y1} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>}
+                          {dimX > boxR + 0.5 && <line x1={boxR} y1={y1} x2={dimX+3} y2={y1} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>}
+                          <line x1={dimX} y1={eFloorY} x2={dimX} y2={y1} stroke="transparent" strokeWidth={8} style={{cursor:"ew-resize"}}
+                            onMouseDown={e => beginElevDimDrag(it.dev.uid, "elevDimBottomDu", bottomDu, -it.u, elevData.wallWidthFt - it.u, e)}/>
+                          {isEditingDim ? renderDimInput(dimX+5, dimMidY-11, "Bottom of equipment height") : (
                             <text x={dimX+5} y={dimMidY} fontSize={8} fill="rgb(var(--text-muted))" fontFamily="'JetBrains Mono',monospace" dominantBaseline="middle"
                               style={{cursor: isCeiling ? "default" : "pointer"}}
                               onDoubleClick={e=>{
                                 e.stopPropagation();
                                 if (isCeiling) return;
-                                setEditingElevDimUid(it.dev.uid);
+                                setEditingElevDim({ uid: it.dev.uid, field: "bottom" });
                                 setElevDimInput(toEditableLength(it.boxBot));
                               }}>
                               {toDisplay(it.boxBot)}
                             </text>
                           )}
+                        </g>
+                      )}
+                      {hDims.length > 0 && (
+                        <g onMouseDown={e=>e.stopPropagation()}>
+                          {hDims.map(h => {
+                            const midX = (h.from + h.to) / 2;
+                            const hDimY = ePY(centerZ + h.dz);
+                            // Extension starts at the box edge facing the dim (not
+                            // the center), so no line is drawn across the device.
+                            const boxTopY = Math.min(y0, y1), boxBotY = Math.max(y0, y1);
+                            const extFrom = hDimY < boxTopY - 0.5 ? boxTopY : hDimY > boxBotY + 0.5 ? boxBotY : null;
+                            const ext = hDimY > centerY ? 3 : -3;
+                            return (
+                              <g key={h.field}>
+                                {extFrom !== null && <line x1={centerX} y1={extFrom} x2={centerX} y2={hDimY + ext} stroke="rgb(var(--text-muted))" strokeWidth={0.6}/>}
+                                <line x1={centerX} y1={hDimY-5} x2={centerX} y2={hDimY+5} stroke="rgb(var(--text-muted))" strokeWidth={0.8}/>
+                                <line x1={h.from} y1={hDimY} x2={h.to} y2={hDimY} stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                                <line x1={h.from} y1={hDimY} x2={h.to} y2={hDimY} stroke="transparent" strokeWidth={8} style={{cursor:"ns-resize"}}
+                                  onMouseDown={e => beginElevDimDrag(it.dev.uid, h.key, h.dz, -centerZ, elevData.roomHFt - centerZ, e)}/>
+                                <path d={`M${h.from+6},${hDimY-3} L${h.from},${hDimY} L${h.from+6},${hDimY+3}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                                <path d={`M${h.to-6},${hDimY-3} L${h.to},${hDimY} L${h.to-6},${hDimY+3}`} fill="none" stroke="rgb(var(--text-muted))" strokeWidth={1}/>
+                                {editingField === h.field ? renderDimInput(midX-34, hDimY-24, h.field === "left" ? "Distance from left wall to device center" : "Distance from device center to right wall") : (
+                                  <text x={midX} y={hDimY-4} textAnchor="middle" fontSize={8} fill="rgb(var(--text-muted))" fontFamily="'JetBrains Mono',monospace"
+                                    style={{cursor:"pointer"}}
+                                    onDoubleClick={e=>{
+                                      e.stopPropagation();
+                                      setEditingElevDim({ uid: it.dev.uid, field: h.field, u: it.u, wallWidthFt: elevData.wallWidthFt, perpX: elevPerp.x, perpY: elevPerp.y });
+                                      setElevDimInput(toEditableLength(h.value));
+                                    }}>
+                                    {toDisplay(h.value)}
+                                  </text>
+                                )}
+                              </g>
+                            );
+                          })}
                         </g>
                       )}
                     </g>
@@ -7352,6 +7776,33 @@ export default function RoomDesignerPage() {
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><line x1="9" y1="7" x2="15" y2="7"/><line x1="12" y1="4" x2="12" y2="10"/></svg>
                 Add to AVGenix Library
               </button>
+            );
+          })()}
+          {deviceContextMenu.fromElevation && (() => {
+            const menuDev = placedDevices.find(d=>d.uid===deviceContextMenu.uid);
+            if (!menuDev) return null;
+            const dimToggles = [
+              { key: "hideElevDimLeft" as const, label: "Left Dimension" },
+              { key: "hideElevDimRight" as const, label: "Right Dimension" },
+              { key: "hideElevDimBottom" as const, label: "Vertical Dimension" },
+            ];
+            return (
+              <>
+                <div style={{height:1,background:"rgb(var(--border))",margin:"4px 0"}} />
+                {dimToggles.map(t => {
+                  const hidden = !!menuDev[t.key];
+                  return (
+                    <button key={t.key} onClick={()=>{ toggleElevDim(menuDev.uid, t.key); setDeviceContextMenu(null); }}
+                      style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"7px 14px",background:"none",border:"none",color:"rgb(var(--text-body))",fontSize:12,cursor:"pointer",textAlign:"left"}}
+                      onMouseEnter={e=>e.currentTarget.style.background="rgb(var(--forge-surface))"} onMouseLeave={e=>e.currentTarget.style.background="none"}>
+                      {hidden
+                        ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>}
+                      {hidden ? "Show" : "Hide"} {t.label}
+                    </button>
+                  );
+                })}
+              </>
             );
           })()}
           <div style={{height:1,background:"rgb(var(--border))",margin:"4px 0"}} />
