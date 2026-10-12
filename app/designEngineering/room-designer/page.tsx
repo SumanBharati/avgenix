@@ -137,6 +137,9 @@ interface PlacedDevice extends DeviceCatalogItem {
   // Per-device toggles for the elevation's automatic dimensions (set from
   // the elevation right-click menu); absent = shown.
   hideElevDimLeft?: boolean; hideElevDimRight?: boolean; hideElevDimBottom?: boolean;
+  // Right-click "Hide Coverage": hides this device's speaker/mic coverage area
+  // or camera FOV cone on the plans (and in the DXF export); absent = shown.
+  hideCoverage?: boolean;
   // Dragged positions of those dims, in feet relative to the device so they
   // move with it: left/right = vertical offset from the device's center
   // height; bottom = horizontal offset of the vertical dim from its center.
@@ -1479,13 +1482,15 @@ export default function RoomDesignerPage() {
         flip.text(labelPt.x + side * 0.05, labelPt.y - 0.15, 0.35, calloutLabel(dev), layer, side > 0 ? "left" : "right");
       }
 
-      if (dev.covShape === "round" && dev.covDiameter) {
+      if (dev.hideCoverage) {
+        // coverage / FOV hidden on the plan — leave it out of the export too
+      } else if (dev.covShape === "round" && dev.covDiameter) {
         flip.circle(dev.x, dev.y, dev.covDiameter / 2, "COVERAGE");
       } else if (dev.covShape === "square" && dev.covW && dev.covL) {
         flip.rect(dev.x - dev.covW / 2, dev.y - dev.covL / 2, dev.covW, dev.covL, "COVERAGE");
       }
 
-      if (dev.type === "camera" && dev.wall !== "ceiling" && dev.mountWall !== "ceiling") {
+      if (!dev.hideCoverage && dev.type === "camera" && dev.wall !== "ceiling" && dev.mountWall !== "ceiling") {
         const mw = dev.mountWall || "north";
         const hfovDeg = dev.hfov || 70;
         const halfAngle = (hfovDeg / 2) * Math.PI / 180;
@@ -3023,6 +3028,10 @@ export default function RoomDesignerPage() {
     e.stopPropagation();
     setSelectedUid(uid);
     setDeviceContextMenu({x:e.clientX, y:e.clientY, uid, fromElevation});
+  };
+  const toggleCoverage = (uid: number) => {
+    pushUndo();
+    setPlacedDevices(prev => prev.map(d => d.uid === uid ? { ...d, hideCoverage: !d.hideCoverage } : d));
   };
   const toggleElevDim = (uid: number, key: "hideElevDimLeft" | "hideElevDimRight" | "hideElevDimBottom") => {
     pushUndo();
@@ -6028,7 +6037,7 @@ export default function RoomDesignerPage() {
                     fovL1=clipToRoom(cpx,cpy,cpx+dirX*reach+perpX*spread,cpy+dirY*reach+perpY*spread);
                     fovL2=clipToRoom(cpx,cpy,cpx+dirX*reach-perpX*spread,cpy+dirY*reach-perpY*spread);
                   }
-                  const fovLines = fovL1&&fovL2 ? (()=>{
+                  const fovLines = !dev.hideCoverage&&fovL1&&fovL2 ? (()=>{
                     const arcR=20;
                     // The cone's edges are exactly facingA ± halfAngle by
                     // definition — computing them directly (rather than via
@@ -6223,7 +6232,7 @@ export default function RoomDesignerPage() {
                     return (<g key={dev.uid} style={{cursor:isDragging?"grabbing":"grab"}} onMouseDown={e=>handleDeviceMouseDown(e,dev.uid)} onClick={e=>{e.stopPropagation();if(e.ctrlKey||e.metaKey||suppressClickClear.current){suppressClickClear.current=false;return;}setSelectedUid(dev.uid);clearSelection();}} onContextMenu={e=>handleDeviceContextMenu(e,dev.uid)} opacity={isDragging?0.7:1}>
                       {isSelected&&<circle cx={mpx} cy={mpy} r={r+5} fill="none" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 2"/>}
                       {/* Coverage area - EPR based */}
-                      <circle cx={mpx} cy={mpy} r={eprPx} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>
+                      {!dev.hideCoverage&&<circle cx={mpx} cy={mpy} r={eprPx} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>}
                       {/* Speaker body - outer rim */}
                       <circle cx={mpx} cy={mpy} r={r} fill={cc.device} stroke={dev.color+"88"} strokeWidth={0.8}/>
                       {/* Grille rings */}
@@ -6251,10 +6260,10 @@ export default function RoomDesignerPage() {
                     return (<g key={dev.uid} style={{cursor:isDragging?"grabbing":"grab"}} onMouseDown={e=>handleDeviceMouseDown(e,dev.uid)} onClick={e=>{e.stopPropagation();if(e.ctrlKey||e.metaKey||suppressClickClear.current){suppressClickClear.current=false;return;}setSelectedUid(dev.uid);clearSelection();}} onContextMenu={e=>handleDeviceContextMenu(e,dev.uid)} opacity={isDragging?0.7:1}>
                       {isSelected&&<rect x={mpx-tileS/2-4} y={mpy-tileS/2-4} width={tileS+8} height={tileS+8} rx={3} fill="none" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 2"/>}
                       {/* Coverage area - round or square */}
-                      {cShape==="round"
+                      {!dev.hideCoverage&&(cShape==="round"
                         ? <circle cx={mpx} cy={mpy} r={cRadius} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>
                         : <rect x={mpx-cHalfW} y={mpy-cHalfL} width={cHalfW*2} height={cHalfL*2} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>
-                      }
+                      )}
                       {/* Tile body */}
                       <rect x={mpx-tileS/2} y={mpy-tileS/2} width={tileS} height={tileS} rx={1.5} fill={cc.device} stroke={dev.color+"88"} strokeWidth={0.8}/>
                       {/* Mic hole grid - 3x3 */}
@@ -6276,7 +6285,7 @@ export default function RoomDesignerPage() {
                     return (<g key={dev.uid} style={{cursor:isDragging?"grabbing":"grab"}} onMouseDown={e=>handleDeviceMouseDown(e,dev.uid)} onClick={e=>{e.stopPropagation();if(e.ctrlKey||e.metaKey||suppressClickClear.current){suppressClickClear.current=false;return;}setSelectedUid(dev.uid);clearSelection();}} onContextMenu={e=>handleDeviceContextMenu(e,dev.uid)} opacity={isDragging?0.7:1}>
                       {isSelected&&<circle cx={mpx} cy={mpy} r={mr+4} fill="none" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 2"/>}
                       {/* Coverage area */}
-                      <circle cx={mpx} cy={mpy} r={tmCovR} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>
+                      {!dev.hideCoverage&&<circle cx={mpx} cy={mpy} r={tmCovR} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>}
                       {/* Outer body */}
                       <circle cx={mpx} cy={mpy} r={mr} fill={cc.device} stroke={dev.color+"88"} strokeWidth={0.8}/>
                       {/* LED ring */}
@@ -6322,7 +6331,7 @@ export default function RoomDesignerPage() {
                   }
                   return (<g key={dev.uid} style={{cursor:isDragging?"grabbing":"grab"}} onMouseDown={e=>handleDeviceMouseDown(e,dev.uid)} onClick={e=>{e.stopPropagation();if(e.ctrlKey||e.metaKey||suppressClickClear.current){suppressClickClear.current=false;return;}setSelectedUid(dev.uid);clearSelection();}} onContextMenu={e=>handleDeviceContextMenu(e,dev.uid)} opacity={isDragging?0.7:1}>
                     {isSelected&&<circle cx={mpx} cy={mpy} r={covR+6} fill="none" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="3 2"/>}
-                    {dev.wall==="ceiling"&&<circle cx={mpx} cy={mpy} r={covR} fill={dev.color} opacity={0.05} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>}
+                    {dev.wall==="ceiling"&&!dev.hideCoverage&&<circle cx={mpx} cy={mpy} r={covR} fill={dev.color} opacity={0.05} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2"/>}
                     <circle cx={mpx} cy={mpy} r={5} fill={dev.color+"33"} stroke={dev.color} strokeWidth={1.5}/>
                     <circle cx={mpx} cy={mpy} r={2} fill={dev.color}/>
                     <text x={mpx} y={mpy-10} textAnchor="middle" fontSize={7} fill={dev.color} className="dev-label">{dev.name}</text>
@@ -6753,8 +6762,8 @@ export default function RoomDesignerPage() {
                     const covL3d=dev.covL||6;
                     return wrapDevice(<g>
                       {/* Coverage projection on floor */}
-                      <line x1={cpx} y1={cpy} x2={fpx} y2={fpy} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2" opacity={0.2}/>
-                      {cShape3d==="round" ? (
+                      {!dev.hideCoverage&&<line x1={cpx} y1={cpy} x2={fpx} y2={fpy} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2" opacity={0.2}/>}
+                      {!dev.hideCoverage&&(cShape3d==="round" ? (
                         <polygon points={Array.from({length:24},(_,i)=>{const a=(i/24)*Math.PI*2;const r=covDia/2;return `${sX(dev.x+r*Math.cos(a),dev.y+r*Math.sin(a),0)},${sY(dev.x+r*Math.cos(a),dev.y+r*Math.sin(a),0)}`;}).join(" ")} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>
                       ) : (
                         <polygon points={[
@@ -6763,7 +6772,7 @@ export default function RoomDesignerPage() {
                           `${sX(dev.x+covW3d/2,dev.y+covL3d/2,0)},${sY(dev.x+covW3d/2,dev.y+covL3d/2,0)}`,
                           `${sX(dev.x-covW3d/2,dev.y+covL3d/2,0)},${sY(dev.x-covW3d/2,dev.y+covL3d/2,0)}`
                         ].join(" ")} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>
-                      )}
+                      ))}
                       {/* Square tile */}
                       <polygon points={tilePts} fill={cc.device} stroke={dev.color+"88"} strokeWidth={0.8}/>
                       {/* Mic hole dots */}
@@ -6780,7 +6789,7 @@ export default function RoomDesignerPage() {
                     const tmCovR3d=(dev.covDiameter||2)/2;
                     return wrapDevice(<g>
                       {/* Coverage circle on table surface */}
-                      <polygon points={isoDisc(tmCovR3d,dev.z,24)} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>
+                      {!dev.hideCoverage&&<polygon points={isoDisc(tmCovR3d,dev.z,24)} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>}
                       {/* Disc side/rim */}
                       <polygon points={isoDisc(discR,dev.z,20)} fill="#2d3748" stroke="#475569" strokeWidth={0.5}/>
                       {/* Top surface */}
@@ -6852,8 +6861,8 @@ export default function RoomDesignerPage() {
                   const spkEprR=spkEpr/2;
                   return wrapDevice(<g>
                     {/* Coverage cone */}
-                    <line x1={spx} y1={spy} x2={sfpx} y2={sfpy} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2" opacity={0.15}/>
-                    <polygon points={Array.from({length:24},(_,i)=>{const a=(i/24)*Math.PI*2;return `${sX(dev.x+spkEprR*Math.cos(a),dev.y+spkEprR*Math.sin(a),0)},${sY(dev.x+spkEprR*Math.cos(a),dev.y+spkEprR*Math.sin(a),0)}`;}).join(" ")} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>
+                    {!dev.hideCoverage&&<line x1={spx} y1={spy} x2={sfpx} y2={sfpy} stroke={dev.color} strokeWidth={0.5} strokeDasharray="3 2" opacity={0.15}/>}
+                    {!dev.hideCoverage&&<polygon points={Array.from({length:24},(_,i)=>{const a=(i/24)*Math.PI*2;return `${sX(dev.x+spkEprR*Math.cos(a),dev.y+spkEprR*Math.sin(a),0)},${sY(dev.x+spkEprR*Math.cos(a),dev.y+spkEprR*Math.sin(a),0)}`;}).join(" ")} fill={dev.color} opacity={0.04} stroke={dev.color} strokeWidth={0.5} strokeDasharray="2 2"/>}
                     {/* Outer rim - flush mount ring */}
                     <polygon points={isoCircS(0.18,roomH,24)} fill={cc.device} stroke={dev.color+"88"} strokeWidth={0.8}/>
                     {/* Grille rings */}
@@ -7237,11 +7246,53 @@ export default function RoomDesignerPage() {
                   const tl2 = tL/2 * cScale;
                   return <rect x={cpX(tcx)-tw2} y={cpY(tcy)-tl2} width={tw2*2} height={tl2*2} rx={2} fill="#cbd5e1" fillOpacity={0.15} stroke="rgb(var(--text-muted))" strokeWidth={0.8} strokeDasharray="3 3" transform={`rotate(${tableRotation},${cpX(tcx)},${cpY(tcy)})`}/>;
                 })()}
-                {/* Placed tables from the floor plan — the Ceiling Plan only shows
-                    tables, as the same dotted reference outline as the built-in
-                    table above. Chairs and other floor furniture aren't ceiling
-                    information, so they're left off. */}
-                {placedDevices.filter(d => (d.id === "conf-table" || d.id === "round-table") && (d.mountWall === "floor" || !d.mountWall)).map(dev => {
+                {/* Chairs around the built-in table: same dotted reference outline
+                    as the table, laid out exactly like the Floor Plan's chairs
+                    (same size, seat positions, per-chair nudges and deletions,
+                    rotating with the table). */}
+                {showTable && (() => {
+                  const tcx = tableCenterX ?? roomW/2;
+                  const tcy = tableWallDist + tL/2;
+                  const hw = tW/2, hl = tL/2;
+                  const sideChairFt = roomElementItems.find(i => i.id === "side-chair")?.w ?? 1.48;
+                  const sps0 = Math.floor(tableSeats/2), lo0 = tableSeats - sps0*2;
+                  const seatPitchFt = tableShape === "round"
+                    ? (Math.PI * Math.max(tW, tL)) / Math.max(1, tableSeats)
+                    : Math.min(sps0 > 0 ? tL / sps0 : Infinity, lo0 > 0 ? tW : Infinity);
+                  const chairFt = Math.max(0.6, Math.min(sideChairFt, seatPitchFt - 0.2));
+                  const sd = chairFt/2 + 0.15; // chair centre distance from the table edge
+                  const chairs: { x: number; y: number; deg: number }[] = [];
+                  if (tableShape === "round") {
+                    const r = Math.max(tW, tL)/2;
+                    for (let i = 0; i < tableSeats; i++) {
+                      const a = (i/tableSeats)*Math.PI*2 - Math.PI/2;
+                      chairs.push({ x: tcx + (r+sd)*Math.cos(a), y: tcy + (r+sd)*Math.sin(a), deg: a*180/Math.PI + 90 });
+                    }
+                  } else {
+                    const taperIn = tableShape === "tapered" ? tW*0.15 : 0;
+                    const sps = sps0, lo = lo0;
+                    for (let i = 0; i < sps; i++) { const t = (i+0.5)/sps; chairs.push({ x: tcx - (hw - taperIn + taperIn*t) - sd, y: tcy - hl + tL*t, deg: 0 }); }
+                    for (let i = 0; i < sps; i++) { const t = (i+0.5)/sps; chairs.push({ x: tcx + (hw - taperIn + taperIn*t) + sd, y: tcy - hl + tL*t, deg: 0 }); }
+                    if (lo >= 1) chairs.push({ x: tcx, y: tcy + hl + sd, deg: 0 });
+                    if (lo >= 2) chairs.push({ x: tcx, y: tcy - hl - sd, deg: 0 });
+                  }
+                  const cs = Math.max(4, chairFt * cScale);
+                  return (
+                    <g transform={`rotate(${tableRotation},${cpX(tcx)},${cpY(tcy)})`} pointerEvents="none">
+                      {chairs.map((c, idx) => {
+                        if (deletedChairs.has(idx)) return null;
+                        const off = chairOffsets[idx];
+                        const px = cpX(c.x + (off?.dx ?? 0)), py = cpY(c.y + (off?.dy ?? 0));
+                        return <rect key={"cch"+idx} x={px - cs/2} y={py - cs/2} width={cs} height={cs} rx={Math.max(1, cs*0.18)} fill="#cbd5e1" fillOpacity={0.15} stroke="rgb(var(--text-muted))" strokeWidth={0.8} strokeDasharray="3 3" transform={`rotate(${c.deg},${px},${py})`}/>;
+                      })}
+                    </g>
+                  );
+                })()}
+                {/* Placed tables and chairs from the floor plan — the Ceiling Plan
+                    shows them as the same dotted reference outline as the built-in
+                    table above. Other floor furniture isn't ceiling information,
+                    so it's left off. */}
+                {placedDevices.filter(d => (d.id === "conf-table" || d.id === "round-table" || (d.type === "furniture" && /chair/.test(d.id))) && (d.mountWall === "floor" || !d.mountWall)).map(dev => {
                   const fw = dev.w * cScale, fl = dev.h * cScale;
                   const outline = { fill: "#cbd5e1", fillOpacity: 0.15, stroke: "rgb(var(--text-muted))", strokeWidth: 0.8, strokeDasharray: "3 3" };
                   if (dev.id === "round-table") return <ellipse key={"csf"+dev.uid} cx={cpX(dev.x)} cy={cpY(dev.y)} rx={fw/2} ry={fl/2} {...outline}/>;
@@ -7297,11 +7348,11 @@ export default function RoomDesignerPage() {
                       // never grab a click meant for something underneath them.
                       <g key={dev.uid} pointerEvents="none" opacity={isDragging?0.7:1}>
                         {renderSelection()}
-                        {specSquare
+                        {!dev.hideCoverage&&(specSquare
                           ? <rect x={dx-dev.covW!*cScale/2} y={dy-dev.covL!*cScale/2} width={dev.covW!*cScale} height={dev.covL!*cScale} fill="rgba(168,85,247,0.08)" stroke="#a855f7" strokeWidth={0.8} strokeDasharray="3 2"/>
-                          : <circle cx={dx} cy={dy} r={r} fill="rgba(168,85,247,0.08)" stroke="#a855f7" strokeWidth={0.8} strokeDasharray="3 2"/>}
+                          : <circle cx={dx} cy={dy} r={r} fill="rgba(168,85,247,0.08)" stroke="#a855f7" strokeWidth={0.8} strokeDasharray="3 2"/>)}
                         {renderBody("#a855f7")}
-                        <text x={dx} y={dy+bodyH/2+9} textAnchor="middle" fontSize={6} fill="#a855f780">{specSquare ? `${toDisplay(dev.covW!)} × ${toDisplay(dev.covL!)}` : `${toDisplay(covDia)} dia`}</text>
+                        {!dev.hideCoverage&&<text x={dx} y={dy+bodyH/2+9} textAnchor="middle" fontSize={6} fill="#a855f780">{specSquare ? `${toDisplay(dev.covW!)} × ${toDisplay(dev.covL!)}` : `${toDisplay(covDia)} dia`}</text>}
                       </g>
                     );
                   }
@@ -7318,11 +7369,11 @@ export default function RoomDesignerPage() {
                       // Only the solid dot is interactive (see the speaker above).
                       <g key={dev.uid} pointerEvents="none" opacity={isDragging?0.7:1}>
                         {renderSelection()}
-                        {specSquare
+                        {!dev.hideCoverage&&(specSquare
                           ? <rect x={dx-dev.covW!*cScale/2} y={dy-dev.covL!*cScale/2} width={dev.covW!*cScale} height={dev.covL!*cScale} fill="rgba(34,197,94,0.06)" stroke="#22c55e" strokeWidth={0.8} strokeDasharray="3 2"/>
-                          : <circle cx={dx} cy={dy} r={r} fill="rgba(34,197,94,0.06)" stroke="#22c55e" strokeWidth={0.8} strokeDasharray="3 2"/>}
+                          : <circle cx={dx} cy={dy} r={r} fill="rgba(34,197,94,0.06)" stroke="#22c55e" strokeWidth={0.8} strokeDasharray="3 2"/>)}
                         {renderBody("#22c55e")}
-                        <text x={dx} y={dy+bodyH/2+9} textAnchor="middle" fontSize={6} fill="#22c55e80">{specSquare ? `${toDisplay(dev.covW!)} × ${toDisplay(dev.covL!)}` : `${toDisplay(covDia)} dia`}</text>
+                        {!dev.hideCoverage&&<text x={dx} y={dy+bodyH/2+9} textAnchor="middle" fontSize={6} fill="#22c55e80">{specSquare ? `${toDisplay(dev.covW!)} × ${toDisplay(dev.covL!)}` : `${toDisplay(covDia)} dia`}</text>}
                       </g>
                     );
                   }
@@ -7806,6 +7857,20 @@ export default function RoomDesignerPage() {
             );
           })()}
           <div style={{height:1,background:"rgb(var(--border))",margin:"4px 0"}} />
+          {/* Hide/Show Coverage: speaker & mic coverage areas and camera FOV cones. */}
+          {(() => {
+            const menuDev = placedDevices.find(d=>d.uid===deviceContextMenu.uid);
+            if (!menuDev || !["speaker","mic","camera"].includes(menuDev.type)) return null;
+            const covHidden = !!menuDev.hideCoverage;
+            return (
+              <button onClick={()=>{ toggleCoverage(menuDev.uid); setDeviceContextMenu(null); }}
+                style={{display:"flex",alignItems:"center",gap:9,width:"100%",padding:"7px 14px",background:"none",border:"none",color:"rgb(var(--text-body))",fontSize:12,cursor:"pointer",textAlign:"left"}}
+                onMouseEnter={e=>e.currentTarget.style.background="rgb(var(--forge-surface))"} onMouseLeave={e=>e.currentTarget.style.background="none"}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" strokeDasharray={covHidden ? undefined : "3 3"}><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5" strokeDasharray="none"/></svg>
+                {covHidden ? "Show" : "Hide"} Coverage
+              </button>
+            );
+          })()}
           {/* Hide: out of THIS view only — Signal Flow, the rack and the BOM keep it. */}
           {(() => {
             const menuDev = placedDevices.find(d=>d.uid===deviceContextMenu.uid);

@@ -89,7 +89,10 @@ export default function TimeTrackingPage() {
     [store.phases, pickerSelected],
   );
 
-  const adHocTasks = store.adHocTasks ?? [];
+  // Archived (deleted) tasks stay in the store so past logged hours keep their name,
+  // but are hidden from the picker and the Manage Tasks list.
+  const allAdHocTasks = store.adHocTasks ?? [];
+  const adHocTasks = useMemo(() => allAdHocTasks.filter((t) => !t.archivedAt), [allAdHocTasks]);
 
   const pickerItems = useMemo(() => {
     const q = pickerSearch.trim().toLowerCase();
@@ -290,14 +293,17 @@ export default function TimeTrackingPage() {
     setManageNewTaskName("");
   }
 
-  // Unlike deleteRow (which only clears the current person's row), this removes
-  // the task and every person's logged time against it — it's a global delete,
-  // so it's confirmed via pendingDeleteTask before running.
+  // Unlike deleteRow (which only clears the current person's row), this retires
+  // the task for everyone. Hours already logged (today or earlier) are kept as-is
+  // and the task is only archived, so those entries still show its name; only
+  // future-dated entries are removed and the task disappears from search/picker.
   function deleteManagedTask(taskId: string) {
+    const today = toISODate(new Date());
+    const archivedAt = new Date().toISOString();
     update((prev) => ({
       ...prev,
-      adHocTasks: (prev.adHocTasks ?? []).filter((t) => t.id !== taskId),
-      timeEntries: prev.timeEntries.filter((e) => e.projectId !== taskId),
+      adHocTasks: (prev.adHocTasks ?? []).map((t) => (t.id === taskId ? { ...t, archivedAt } : t)),
+      timeEntries: prev.timeEntries.filter((e) => !(e.projectId === taskId && e.date > today)),
     }));
   }
 
@@ -395,7 +401,7 @@ export default function TimeTrackingPage() {
                 ) : (
                   rows.map((r, i) => {
                     const proj = store.projects.find((p) => p.id === r.projectId);
-                    const task = !proj ? adHocTasks.find((t) => t.id === r.projectId) : undefined;
+                    const task = !proj ? allAdHocTasks.find((t) => t.id === r.projectId) : undefined;
                     const phase = r.phaseId ? store.phases.find((ph) => ph.id === r.phaseId) : null;
                     const rowTotal = weekDays.reduce(
                       (s, d) => s + hoursFor(r.projectId, r.phaseId, toISODate(d)),
@@ -819,7 +825,7 @@ export default function TimeTrackingPage() {
       {pendingDeleteTask && (
         <ConfirmDialog
           title="Delete task"
-          message={<>Delete <span className="font-semibold text-heading">{pendingDeleteTask.name}</span>? This removes it and all logged hours against it for everyone.</>}
+          message={<>Delete <span className="font-semibold text-heading">{pendingDeleteTask.name}</span>? It will no longer be available to add going forward. Hours already logged against it are kept.</>}
           onCancel={() => setPendingDeleteTask(null)}
           onConfirm={() => {
             deleteManagedTask(pendingDeleteTask.id);

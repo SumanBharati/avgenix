@@ -144,6 +144,8 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
   const [loading, setLoading] = useState(false);
   const [showActions, setShowActions] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const lastAssistantRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const chatContext = useAIChatContext();
 
@@ -186,9 +188,17 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
     ];
   }, [chatContext.project?.id, chatContext.survey, chatContext.proposal]);
 
+  // Scroll once per new message: the user's own message goes to the bottom,
+  // a new assistant answer is aligned to its top so reading starts at the beginning.
+  // No scrolling while the answer streams in.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    if (messages.length === 0) return;
+    if (messages[messages.length - 1].role === "assistant") {
+      lastAssistantRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length]);
 
   const sendMessage = useCallback(async (text: string, isAction = false) => {
     if (!text || loading) return;
@@ -199,6 +209,10 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
     setInput("");
     setLoading(true);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let answer = "";
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -207,19 +221,30 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
           messages: updatedMessages.map((m) => ({ role: m.role, content: m.content })),
           projectContext: chatContext,
         }),
+        signal: controller.signal,
       });
 
-      const data = await res.json();
-
-      if (data.error) {
-        setMessages([...updatedMessages, { role: "assistant", content: `Error: ${data.error}` }]);
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
+        setMessages([...updatedMessages, { role: "assistant", content: `Error: ${data.error ?? "Request failed"}` }]);
       } else {
-        setMessages([...updatedMessages, { role: "assistant", content: data.text, isAction }]);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          answer += decoder.decode(value, { stream: true });
+          setMessages([...updatedMessages, { role: "assistant", content: answer, isAction }]);
+        }
       }
-    } catch {
-      setMessages([...updatedMessages, { role: "assistant", content: "Sorry, something went wrong. Please try again." }]);
+    } catch (err) {
+      // A user-initiated stop keeps whatever text has arrived
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setMessages([...updatedMessages, { role: "assistant", content: answer ? `${answer}\n\n_(response interrupted)_` : "Sorry, something went wrong. Please try again." }]);
+      }
     }
 
+    abortRef.current = null;
     setLoading(false);
     inputRef.current?.focus();
   }, [messages, loading, chatContext]);
@@ -300,7 +325,11 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
         ) : (
           <div className="space-y-3">
             {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                key={i}
+                ref={i === messages.length - 1 && msg.role === "assistant" ? lastAssistantRef : undefined}
+                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+              >
                 <div
                   className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
                     msg.role === "user"
@@ -324,7 +353,7 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
               </div>
             ))}
 
-            {loading && (
+            {loading && messages[messages.length - 1]?.role === "user" && (
               <div className="flex justify-start">
                 <div className="rounded-xl bg-forge-surface px-3.5 py-2.5">
                   <div className="flex items-center gap-1">
@@ -382,13 +411,19 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
           disabled={loading}
           className="forge-input flex-1"
         />
-        <button
-          type="submit"
-          disabled={loading || !input.trim()}
-          className="forge-btn-primary disabled:opacity-50"
-        >
-          <SendIcon />
-        </button>
+        {loading ? (
+          <button type="button" onClick={() => abortRef.current?.abort()} className="forge-btn-primary" title="Stop generating">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="2" width="10" height="10" rx="2" /></svg>
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            className="forge-btn-primary disabled:opacity-50"
+          >
+            <SendIcon />
+          </button>
+        )}
       </form>
     </div>
   );
@@ -403,9 +438,13 @@ function formatMarkdown(text: string): string {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`(.+?)`/g, '<code class="rounded bg-forge-panel px-1 py-0.5 text-[12px]">$1</code>')
+    .replace(/^#### (.+)$/gm, '<h5 class="mt-2 mb-0.5 text-[13px] font-semibold text-heading">$1</h5>')
     .replace(/^### (.+)$/gm, '<h4 class="mt-2 mb-1 text-[13px] font-semibold text-heading">$1</h4>')
     .replace(/^## (.+)$/gm, '<h3 class="mt-2 mb-1 text-[14px] font-semibold text-heading">$1</h3>')
+    .replace(/^# (.+)$/gm, '<h2 class="mt-1 mb-1.5 text-[15px] font-bold text-heading">$1</h2>')
     .replace(/^- (.+)$/gm, '<li class="ml-3 list-disc text-[13px]">$1</li>')
     .replace(/^(\d+)\. (.+)$/gm, '<li class="ml-3 list-decimal text-[13px]">$2</li>')
+    // block elements already break the line; don't add an extra <br /> after them
+    .replace(/(<\/(?:h[2-5]|li)>)\n/g, "$1")
     .replace(/\n/g, "<br />");
 }

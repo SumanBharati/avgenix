@@ -534,7 +534,7 @@ export function Scheduler({
               id: uid(),
               title: "",
               personId: creating!.personId,
-              projectId: store.projects[0]?.id || "",
+              projectId: "",
               phaseId: null,
               startDate: creating!.startDate,
               endDate: creating!.endDate,
@@ -731,10 +731,13 @@ export function Scheduler({
                 border: tentative ? `2px dashed ${color}` : `1px solid ${color}`,
                 color: tentative ? color : "#fff",
               }}
-              title={`${proj?.name || a.title || "?"}${phase ? " · " + phase.name : ""}\n${a.hoursPerDay}h · ${fmtDateShort(a.startDate)} – ${fmtDateShort(a.endDate)}`}
+              title={`${[proj?.name, a.title?.trim()].filter(Boolean).join(" — ") || "Task"}${phase ? " · " + phase.name : ""}\n${a.hoursPerDay}h · ${fmtDateShort(a.startDate)} – ${fmtDateShort(a.endDate)}`}
             >
               <div className="flex w-full flex-col overflow-hidden">
-                <span className="truncate leading-tight">{proj?.name || a.title || "Task"}</span>
+                {proj?.name && <span className="truncate leading-tight">{proj.name}</span>}
+                {(a.title?.trim() || !proj?.name) && (
+                  <span className={`truncate leading-tight ${proj?.name ? "text-[9px] opacity-90" : ""}`}>{a.title?.trim() || "Task"}</span>
+                )}
                 {phase && <span className="truncate text-[9px] opacity-80">{phase.name}</span>}
                 <span className="truncate text-[9px] opacity-80">{a.hoursPerDay}h</span>
               </div>

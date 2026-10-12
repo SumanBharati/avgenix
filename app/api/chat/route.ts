@@ -163,7 +163,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Call Claude
-    const response = await anthropic.messages.create({
+    const stream = anthropic.messages.stream({
       model: "claude-sonnet-5",
       max_tokens: 4096,
       system: fullSystemPrompt,
@@ -173,10 +173,30 @@ export async function POST(request: NextRequest) {
       })),
     });
 
-    const textBlock = response.content.find((b) => b.type === "text");
-    const text = textBlock && textBlock.type === "text" ? textBlock.text : "";
+    // Stream plain text to the client as it is generated
+    const encoder = new TextEncoder();
+    const body = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const event of stream) {
+            if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+              controller.enqueue(encoder.encode(event.delta.text));
+            }
+          }
+          controller.close();
+        } catch (err) {
+          console.error("Chat stream error:", err);
+          controller.error(err);
+        }
+      },
+      cancel() {
+        stream.abort();
+      },
+    });
 
-    return NextResponse.json({ text });
+    return new Response(body, {
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache, no-transform" },
+    });
   } catch (err: any) {
     console.error("Chat API error:", err);
     return NextResponse.json(

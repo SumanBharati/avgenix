@@ -69,6 +69,26 @@ function PhoneCodeSelect({ value, onChange }: { value: string; onChange: (code: 
   );
 }
 
+// Dollar amount field that keeps what you type: a bare 0 is shown as an empty
+// box (placeholder "0") so you can type over it, instead of snapping back to 0
+// and leaving a stray leading zero ("0100") when the field is cleared.
+function MoneyInput({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const [text, setText] = useState(value ? String(value) : "");
+  useEffect(() => {
+    // follow outside changes (initial load, reset) without fighting the user's typing
+    if ((parseFloat(text) || 0) !== value) setText(value ? String(value) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      type="number" min="0" step="0.01" placeholder="0"
+      value={text}
+      onChange={(e) => { setText(e.target.value); onChange(parseFloat(e.target.value) || 0); }}
+      className="forge-input pl-6 text-[13px]"
+    />
+  );
+}
+
 export default function OrgSettingsPage() {
   const router = useRouter();
   const { activeOrg, refreshOrgs, isPro, openUpgradeModal } = useOrg();
@@ -632,9 +652,7 @@ export default function OrgSettingsPage() {
                     {laborItems.map((item) => (
                       <div key={item.key} className="relative">
                         <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[12px] text-muted">$</span>
-                        <input type="number" min="0" step="0.01" value={item.rate}
-                          onChange={(e) => updateLaborItem(item.key, { rate: parseFloat(e.target.value) || 0 })}
-                          className="forge-input pl-6 text-[13px]" />
+                        <MoneyInput value={item.rate} onChange={(rate) => updateLaborItem(item.key, { rate })} />
                       </div>
                     ))}
                   </div>
@@ -644,9 +662,7 @@ export default function OrgSettingsPage() {
                     {laborItems.map((item) => (
                       <div key={item.key} className="relative">
                         <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[12px] text-muted">$</span>
-                        <input type="number" min="0" step="0.01" value={item.cost}
-                          onChange={(e) => updateLaborItem(item.key, { cost: parseFloat(e.target.value) || 0 })}
-                          className="forge-input pl-6 text-[13px]" />
+                        <MoneyInput value={item.cost} onChange={(cost) => updateLaborItem(item.key, { cost })} />
                       </div>
                     ))}
                   </div>

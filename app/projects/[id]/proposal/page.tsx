@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useEffect, useCallback } from "react";
+import { Fragment, useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { useOrg } from "@/components/OrgProvider";
@@ -31,6 +31,14 @@ interface LineItem {
   markup: number | null;
   laborHours: number;
   laborRate: number;
+  // Which System this line belongs to (Audio, Video Presentation, …) — an
+  // optional grouping across rooms; see ProposalData.systems.
+  system?: string;
+  // Set on every line that came in with a saved Bundle: all lines from one
+  // "add" share a bundleId (so they group under a collapsible header) and
+  // carry the bundle's name. Plain lines leave both unset.
+  bundleId?: string;
+  bundleName?: string;
   // Set when this line was added while editing under a Change Order (see the
   // "Change Order" bar below the header) — lets that CO's cost impact be
   // computed live from the current price of whatever it added.
@@ -62,7 +70,12 @@ interface ProposalData {
   sections: Section[];
   taxRate: number;
   marginPercent: number;
+  // The project's list of Systems that line items can be grouped into
+  // (independent of rooms). Absent = the defaults below.
+  systems?: string[];
 }
+
+const DEFAULT_SYSTEMS = ["Audio", "Video", "Control"];
 
 const CATEGORIES = [
   "Display", "Audio", "Video Processing", "Control System", "Cabling",
@@ -92,6 +105,16 @@ interface LaborLibraryEntry {
 }
 
 
+
+// A saved Bundle from My Library (bundle_library): a named set of the org's own
+// equipment / labor library items with a quantity each — units for equipment,
+// hours for labor. Adding one drops all of its items into the section.
+interface BundleEntry {
+  id: string;
+  name: string;
+  description: string;
+  items: { kind: "equipment" | "labor"; id: string; qty: number }[];
+}
 
 const DEFAULT_LIBRARY: EquipmentEntry[] = [
   { id: "eq-1",  category: "Display",           manufacturer: "Samsung",     model: "QM85R",           description: "85\" 4K UHD Commercial Display",               unitCost: 3200 },
@@ -153,6 +176,152 @@ const defaultProposal: ProposalData = {
 // fields, so old data still loads exactly as it was left. Pre-existing
 // sections are marked as already synced — auto-population only ever applies
 // to a brand-new section for a room that never had one.
+// Number box that keeps what you type (no stuck leading 0 when clearing it) and
+// re-syncs when the underlying value is changed from elsewhere.
+function NumInput({ value, onText, min, step = "any" }: { value: number; onText: (text: string) => void; min?: string; step?: string }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    if ((parseFloat(text) || 0) !== value) setText(String(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      type="number" min={min} step={step}
+      value={text}
+      onChange={(e) => { setText(e.target.value); onText(e.target.value); }}
+      className="w-full rounded-lg border border-border bg-forge-surface/60 px-3 py-2 text-[13px] text-heading focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+    />
+  );
+}
+
+// The pop-up a proposal line opens in on double-click — the same look as the
+// library's product pop-up — so a line's manufacturer / part # / price can only
+// be changed deliberately (edit, then Save), not by typing into the table.
+function LineItemModal({ item, systems, defaultMargin, onSave, onClose }: {
+  item: LineItem;
+  systems: string[];
+  defaultMargin: number;
+  onSave: (next: LineItem) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState<LineItem>(item);
+  const isLabor = draft.category === "Labor";
+  const showLabor = isLabor || (draft.laborHours || 0) > 0;
+  const set = <K extends keyof LineItem>(k: K, v: LineItem[K]) => setDraft((d) => ({ ...d, [k]: v }));
+  const num = (t: string) => (parseFloat(t) || 0);
+
+  // Margin / Markup are mutually exclusive overrides — editing one clears the other;
+  // editing Unit Price back-calculates Margin; clearing falls back to the proposal default.
+  const marginVal = (t: string) => { const m = t === "" ? null : parseFloat(t); return m == null || Number.isNaN(m) ? null : m; };
+  const isOverridden = draft.margin != null || draft.markup != null;
+  const inputCls = "w-full rounded-lg border border-border bg-forge-surface/60 px-3 py-2 text-[13px] text-heading placeholder:text-faint focus:border-blue-500/50 focus:outline-none focus:ring-1 focus:ring-blue-500/30";
+  const labelCls = "mb-1 block text-[11px] font-medium text-muted";
+  const title = isLabor ? (draft.description || "Labor") : ([draft.manufacturer, draft.model].filter(Boolean).join(" ") || draft.description || "Line item");
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border border-border bg-forge-bg shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-6 py-4">
+          <div className="min-w-0">
+            <h3 className="truncate text-[15px] font-bold text-heading">{title}</h3>
+            <div className="mt-0.5 text-[11px] text-subtle">{draft.category}{isLabor ? "" : " · category is set on the product"}</div>
+          </div>
+          <button onClick={onClose} className="shrink-0 text-muted transition-colors hover:text-heading" title="Close without saving">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
+          {!isLabor && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Manufacturer</label>
+                <input value={draft.manufacturer} onChange={(e) => set("manufacturer", e.target.value)} placeholder="e.g. Crestron" className={inputCls} />
+              </div>
+              <div>
+                <label className={labelCls}>Model</label>
+                <input value={draft.model} onChange={(e) => set("model", e.target.value)} placeholder="Model #" className={inputCls} />
+              </div>
+              <div>
+                <label className={labelCls}>Part #</label>
+                <input value={draft.partNumber || ""} onChange={(e) => set("partNumber", e.target.value)} placeholder="Part #" className={`${inputCls} font-mono`} />
+              </div>
+              <div>
+                <label className={labelCls}>System</label>
+                <select value={draft.system || ""} onChange={(e) => set("system", e.target.value)} className={inputCls}>
+                  <option value="">—</option>
+                  {systems.map((sy) => <option key={sy} value={sy}>{sy}</option>)}
+                  {draft.system && !systems.includes(draft.system) && <option value={draft.system}>{draft.system}</option>}
+                </select>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <label className={labelCls}>Description</label>
+            <input value={draft.description} onChange={(e) => set("description", e.target.value)} placeholder="Item description" className={inputCls} />
+          </div>
+
+          {!isLabor && (
+            <div className="grid grid-cols-5 gap-3">
+              <div>
+                <label className={labelCls}>Qty</label>
+                <NumInput value={draft.qty} min="0" step="1" onText={(t) => set("qty", parseInt(t) || 0)} />
+              </div>
+              <div>
+                <label className={labelCls}>Unit Cost</label>
+                <NumInput value={draft.unitCost} min="0" step="0.01" onText={(t) => set("unitCost", num(t))} />
+              </div>
+              <div>
+                <label className={labelCls}>Margin %</label>
+                <NumInput value={sharedItemMargin(draft, defaultMargin)} step="0.1" onText={(t) => setDraft((d) => ({ ...d, margin: marginVal(t), markup: null }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Markup %</label>
+                <NumInput value={sharedItemMarkup(draft, defaultMargin)} step="0.1" onText={(t) => setDraft((d) => ({ ...d, markup: marginVal(t), margin: null }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Unit Price</label>
+                <NumInput value={sharedItemPrice(draft, defaultMargin)} min="0" step="0.01" onText={(t) => setDraft((d) => { const p = marginVal(t); return { ...d, margin: p == null ? null : marginFromPrice(d.unitCost, p), markup: null }; })} />
+              </div>
+              {!isOverridden && <p className="col-span-5 -mt-1 text-[11px] text-subtle">Using the proposal&apos;s default Margin % — change Margin, Markup or Unit Price to override it for this line.</p>}
+            </div>
+          )}
+
+          {showLabor && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Labor Hours</label>
+                <NumInput value={draft.laborHours} min="0" step="0.25" onText={(t) => set("laborHours", num(t))} />
+              </div>
+              <div>
+                <label className={labelCls}>Labor Rate ($/hr)</label>
+                <NumInput value={draft.laborRate} min="0" step="0.01" onText={(t) => set("laborRate", num(t))} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-6 py-4">
+          <div className="text-[13px] text-muted">Line total <span className="ml-1 font-semibold text-heading">${fmt(sharedItemLineTotal(draft, defaultMargin))}</span></div>
+          <div className="flex items-center gap-3">
+            <button onClick={onClose} className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted transition-colors hover:text-body">Cancel</button>
+            <button onClick={() => onSave(draft)} className="rounded-lg bg-violet-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-violet-500">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function migrateProposal(raw: any): ProposalData {
   const legacyScope = typeof raw?.scopeOfWork === "string" ? raw.scopeOfWork : "";
   const rawSections = Array.isArray(raw?.sections) ? raw.sections : [];
@@ -170,6 +339,7 @@ function migrateProposal(raw: any): ProposalData {
     sections,
     taxRate: typeof raw?.taxRate === "number" ? raw.taxRate : 8.25,
     marginPercent: typeof raw?.marginPercent === "number" ? raw.marginPercent : 30,
+    systems: Array.isArray(raw?.systems) ? raw.systems.filter((x: unknown): x is string => typeof x === "string" && x.trim() !== "") : undefined,
   };
 }
 
@@ -294,6 +464,12 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
   const [newCOTitle, setNewCOTitle] = useState("");
   const [creatingCO, setCreatingCO] = useState(false);
   const [activeSection, setActiveSection] = useState<string>("");
+  // When set, the main area shows items grouped by System across all rooms
+  // instead of a single room's section.
+  const [systemView, setSystemView] = useState<"all" | { name: string } | null>(null);
+  const [addingSystem, setAddingSystem] = useState(false);
+  const [newSystemName, setNewSystemName] = useState("");
+  const [pendingDeleteSystem, setPendingDeleteSystem] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [projectJobNumber, setProjectJobNumber] = useState("");
@@ -303,6 +479,23 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
   const [modalTab, setModalTab] = useState<"library" | "create">("library");
   const [library, setLibrary] = useState<EquipmentEntry[]>([]);
   const [laborLibrary, setLaborLibrary] = useState<LaborLibraryEntry[]>([]);
+  const [bundles, setBundles] = useState<BundleEntry[]>([]);
+  const [collapsedBundles, setCollapsedBundles] = useState<Set<string>>(new Set());
+  // Line items are read-only text in the table. Double-clicking one opens it in a
+  // pop-up (like a library product) where it's edited and saved deliberately —
+  // typing straight into manufacturer / part # cells made it too easy to change
+  // a product's details by accident.
+  const [lineModal, setLineModal] = useState<{ sectionId: string; item: LineItem } | null>(null);
+  function saveLineModal(next: LineItem) {
+    if (!lineModal) return;
+    setProposal((p) => ({
+      ...p,
+      sections: p.sections.map((s) =>
+        s.id === lineModal.sectionId ? { ...s, items: s.items.map((i) => (i.id === next.id ? next : i)) } : s
+      ),
+    }));
+    setLineModal(null);
+  }
   const [newEquip, setNewEquip] = useState<Omit<EquipmentEntry, "id">>({
     category: CATEGORIES[0], manufacturer: "", model: "", partNumber: "", description: "", unitCost: 0,
   });
@@ -353,6 +546,18 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     supabase.from("labor_library").select("*").eq("org_id", activeOrg.id).then(({ data }) => {
       if (cancelled || !data) return;
       setLaborLibrary(data.map((d) => ({ id: d.id, label: d.label, rate: Number(d.rate), cost: Number(d.cost) })));
+    });
+    return () => { cancelled = true; };
+  }, [activeOrg]);
+
+  // Org Bundles (My Library → Bundles). A missing table (migration not run
+  // yet) just means there are no bundles to offer.
+  useEffect(() => {
+    if (!activeOrg) return;
+    let cancelled = false;
+    supabase.from("bundle_library").select("*").eq("org_id", activeOrg.id).order("name").then(({ data, error }) => {
+      if (cancelled || error || !data) return;
+      setBundles(data.map((d) => ({ id: d.id, name: d.name, description: d.description || "", items: Array.isArray(d.items) ? d.items : [] })));
     });
     return () => { cancelled = true; };
   }, [activeOrg]);
@@ -672,69 +877,15 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     if (isUnderActiveCO) saveProposalData(next);
   }
 
-  function updateItem(sectionId: string, itemId: string, field: keyof LineItem, value: string | number) {
-    setProposal((p) => ({
-      ...p,
-      sections: p.sections.map((s) =>
-        s.id === sectionId
-          ? { ...s, items: s.items.map((i) => (i.id === itemId ? { ...i, [field]: value } : i)) }
-          : s
-      ),
-    }));
-  }
-
-  // Margin/Markup are mutually exclusive explicit overrides — editing one
-  // clears the other so there's only ever one anchor besides Cost. Editing
-  // Price back-calculates Margin (matching the same convention used on the
-  // Equipment Library form), and clearing any of the three drops the item
-  // back to the proposal's default Margin %.
-  function updateItemMargin(sectionId: string, itemId: string, value: string) {
-    const margin = value === "" ? null : parseFloat(value);
-    setProposal((p) => ({
-      ...p,
-      sections: p.sections.map((s) =>
-        s.id === sectionId
-          ? { ...s, items: s.items.map((i) => (i.id === itemId ? { ...i, margin: Number.isNaN(margin) ? null : margin, markup: null } : i)) }
-          : s
-      ),
-    }));
-  }
-
-  function updateItemMarkup(sectionId: string, itemId: string, value: string) {
-    const markup = value === "" ? null : parseFloat(value);
-    setProposal((p) => ({
-      ...p,
-      sections: p.sections.map((s) =>
-        s.id === sectionId
-          ? { ...s, items: s.items.map((i) => (i.id === itemId ? { ...i, markup: Number.isNaN(markup) ? null : markup, margin: null } : i)) }
-          : s
-      ),
-    }));
-  }
-
-  function updateItemPrice(sectionId: string, itemId: string, value: string) {
-    const parsed = value === "" ? null : parseFloat(value);
-    const price = parsed != null && Number.isNaN(parsed) ? null : parsed;
-    setProposal((p) => ({
-      ...p,
-      sections: p.sections.map((s) =>
-        s.id === sectionId
-          ? { ...s, items: s.items.map((i) => (i.id === itemId ? { ...i, margin: price == null ? null : marginFromPrice(i.unitCost, price), markup: null } : i)) }
-          : s
-      ),
-    }));
-  }
-
-  function addItemFromEquipment(entry: EquipmentEntry) {
-    if (!currentSection) return;
-    const item: LineItem = {
+  function buildEquipmentLine(entry: EquipmentEntry, qty = 1): LineItem {
+    return {
       id: crypto.randomUUID(),
       category: entry.category,
       manufacturer: entry.manufacturer,
       model: entry.model,
       partNumber: entry.partNumber,
       description: entry.description,
-      qty: 1,
+      qty,
       unitCost: entry.unitCost,
       margin: entry.margin ?? null,
       markup: entry.margin == null ? (entry.markup ?? null) : null,
@@ -742,10 +893,34 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
       laborRate: 85,
       changeOrderId: activeChangeOrderId,
     };
+  }
+
+  // hours: 1 hour is just a starting point for a single pick — adjust in the
+  // Labor Hrs column. A Bundle passes its own saved hours.
+  function buildLaborLine(entry: LaborLibraryEntry, hours = 1): LineItem {
+    return {
+      id: crypto.randomUUID(),
+      category: "Labor",
+      manufacturer: "",
+      model: "", // labor has no model — its name is the Description
+      partNumber: undefined,
+      description: entry.label,
+      qty: 1,
+      unitCost: 0,
+      margin: null,
+      markup: null,
+      laborHours: hours,
+      laborRate: entry.rate,
+      changeOrderId: activeChangeOrderId,
+    };
+  }
+
+  function addLinesToCurrentSection(lines: LineItem[]) {
+    if (!currentSection || lines.length === 0) return;
     const next: ProposalData = {
       ...proposal,
       sections: proposal.sections.map((s) =>
-        s.id === currentSection.id ? { ...s, items: [...s.items, item] } : s
+        s.id === currentSection.id ? { ...s, items: [...s.items, ...lines] } : s
       ),
     };
     setProposal(next);
@@ -758,34 +933,60 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     setModalSearch("");
   }
 
+  function addItemFromEquipment(entry: EquipmentEntry) {
+    addLinesToCurrentSection([buildEquipmentLine(entry)]);
+  }
+
   function addItemFromLabor(entry: LaborLibraryEntry) {
-    if (!currentSection) return;
-    const item: LineItem = {
-      id: crypto.randomUUID(),
-      category: "Labor",
-      manufacturer: "",
-      model: entry.label,
-      partNumber: undefined,
-      description: entry.label,
-      qty: 1,
-      unitCost: 0,
-      margin: null,
-      markup: null,
-      // 1 hour is just a starting point — adjust in the Labor Hrs column.
-      laborHours: 1,
-      laborRate: entry.rate,
-      changeOrderId: activeChangeOrderId,
-    };
+    addLinesToCurrentSection([buildLaborLine(entry)]);
+  }
+
+  // Drops every item of a saved Bundle into the section as its own line. Items
+  // since deleted from the library are skipped.
+  function addBundle(bundle: BundleEntry) {
+    const lines: LineItem[] = [];
+    for (const ref of bundle.items) {
+      if (ref.kind === "labor") {
+        const l = laborLibrary.find((x) => x.id === ref.id);
+        if (l) lines.push(buildLaborLine(l, ref.qty));
+      } else {
+        const e = library.find((x) => x.id === ref.id);
+        if (e) lines.push(buildEquipmentLine(e, ref.qty));
+      }
+    }
+    const bundleId = crypto.randomUUID();
+    addLinesToCurrentSection(lines.map((l) => ({ ...l, bundleId, bundleName: bundle.name })));
+  }
+
+  function toggleBundle(bundleId: string) {
+    setCollapsedBundles((prev) => {
+      const next = new Set(prev);
+      if (next.has(bundleId)) next.delete(bundleId); else next.add(bundleId);
+      return next;
+    });
+  }
+
+  // Removes every line that came in with one added Bundle. Mirrors removeItem:
+  // under a Change Order, lines that pre-date it are snapshotted first so the
+  // CO's cost impact still has their price.
+  async function removeBundle(sectionId: string, bundleId: string) {
+    const section = proposal.sections.find((s) => s.id === sectionId);
+    const group = section?.items.filter((i) => i.bundleId === bundleId) ?? [];
+    const snapshotItems = activeChangeOrderId ? group.filter((i) => i.changeOrderId !== activeChangeOrderId) : [];
+    for (const item of snapshotItems) {
+      await recordRemovedItem(activeChangeOrderId!, {
+        id: item.id, category: item.category, manufacturer: item.manufacturer, model: item.model, description: item.description,
+        qty: item.qty, priceAtRemoval: itemPrice(item), lineTotalAtRemoval: itemLineTotal(item),
+      });
+    }
     const next: ProposalData = {
       ...proposal,
       sections: proposal.sections.map((s) =>
-        s.id === currentSection.id ? { ...s, items: [...s.items, item] } : s
+        s.id === sectionId ? { ...s, items: s.items.filter((i) => i.bundleId !== bundleId) } : s
       ),
     };
     setProposal(next);
-    if (activeChangeOrderId) saveProposalData(next);
-    setShowAddModal(false);
-    setModalSearch("");
+    if (snapshotItems.length > 0) saveProposalData(next);
   }
 
   async function handleCreateAndAdd() {
@@ -815,12 +1016,239 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     );
   });
 
+  const filteredBundles = bundles.filter((b) =>
+    !modalSearch || b.name.toLowerCase().includes(modalSearch.toLowerCase()) || b.description.toLowerCase().includes(modalSearch.toLowerCase())
+  );
+
   const filteredLaborLibrary = laborLibrary.filter((e) =>
     !modalSearch || e.label.toLowerCase().includes(modalSearch.toLowerCase())
   );
 
   // Calculations
   const currentSection = proposal.sections.find((s) => s.id === activeSection);
+  // Labor is billed through its own "Labor" line items (hours × rate), not on
+  // equipment — so the Labor Hrs / Labor Rate columns only appear in a section
+  // that has labor lines, and only carry inputs on those lines. An equipment
+  // line that still has labor hours from before stays visible so it isn't
+  // billed invisibly.
+  const rowHasLabor = (i: LineItem) => i.category === "Labor" || (i.laborHours || 0) > 0;
+  const systems = proposal.systems ?? DEFAULT_SYSTEMS;
+  function renderItemsTable(section: Section, itemsToShow: LineItem[], allowAdd: boolean) {
+    const showLaborCols = itemsToShow.some(rowHasLabor);
+    // Read-only cell text, sized like the inputs so rows don't jump when edited.
+    const txt = (v: string | number | undefined | null, cls = "") => (
+      <span className={`block truncate px-2 py-2 text-[13px] ${cls || "text-secondary"}`}>{v === undefined || v === null || v === "" ? "\u00A0" : v}</span>
+    );
+    return (
+        <div className="overflow-x-auto rounded-xl border border-border">
+          <table className="w-full text-left text-[13px]">
+            <thead>
+              <tr className="border-b border-border bg-forge-panel/60 text-[11px] font-semibold uppercase tracking-wider text-subtle">
+                <th className="px-3 py-3">Category</th>
+                      <th className="px-3 py-3">System</th>
+                <th className="px-3 py-3">Manufacturer</th>
+                <th className="px-3 py-3">Model</th>
+                <th className="px-3 py-3">Part #</th>
+                <th className="px-3 py-3 min-w-[200px]">Description</th>
+                <th className="px-3 py-3 text-right">Qty</th>
+                <th className="px-3 py-3 text-right">Unit Cost</th>
+                <th className="px-3 py-3 text-right">Margin %</th>
+                <th className="px-3 py-3 text-right">Markup %</th>
+                <th className="px-3 py-3 text-right">Unit Price</th>
+                {showLaborCols && <th className="px-3 py-3 text-right">Labor Hrs</th>}
+                {showLaborCols && <th className="px-3 py-3 text-right">Labor Rate</th>}
+                <th className="px-3 py-3 text-right">Line Total</th>
+                <th className="w-10 px-2 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {itemsToShow.map((item, idx) => {
+                const prevItem = idx > 0 ? itemsToShow[idx - 1] : undefined;
+                const startsBundle = !!item.bundleId && item.bundleId !== prevItem?.bundleId;
+                const collapsed = !!item.bundleId && collapsedBundles.has(item.bundleId);
+                const bundleGroup = startsBundle ? itemsToShow.filter((i) => i.bundleId === item.bundleId) : [];
+                const bundleHeader = startsBundle ? (
+                  <tr key={"bundle-" + item.bundleId} className="border-b border-border bg-blue-500/[0.07]">
+                    <td colSpan={showLaborCols ? 13 : 11} className="px-3 py-2">
+                      <button
+                        onClick={() => toggleBundle(item.bundleId!)}
+                        className="flex items-center gap-2 text-left"
+                        aria-expanded={!collapsed}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className={`shrink-0 text-subtle transition-transform ${collapsed ? "" : "rotate-90"}`}>
+                          <path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                        <span className="text-[13px] font-semibold text-heading">{item.bundleName || "Bundle"}</span>
+                        <span className="rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-300">Bundle</span>
+                        <span className="text-[11px] text-subtle">{bundleGroup.length} item{bundleGroup.length === 1 ? "" : "s"}</span>
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 text-right text-[13px] font-semibold text-body">
+                      ${fmt(bundleGroup.reduce((sum, i) => sum + itemLineTotal(i), 0))}
+                    </td>
+                    <td className="px-2 py-2">
+                      {allowAdd && (
+                        <button
+                          onClick={() => removeBundle(section.id, item.bundleId!)}
+                          title="Remove this bundle and all its lines"
+                          className="rounded p-1 text-faint transition-colors hover:bg-red-500/10 hover:text-red-400"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                            <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ) : null;
+                const isOverridden = item.margin != null || item.markup != null;
+    const isLabor = item.category === "Labor";
+                const itemCO = item.changeOrderId ? changeOrders.find((c) => c.id === item.changeOrderId) : null;
+                const row = (
+                  <tr
+                    key={item.id}
+                    onDoubleClick={() => setLineModal({ sectionId: section.id, item })}
+                    title={itemCO ? `Added by Change Order: ${itemCO.title}` : "Double-click to edit"}
+                    className={`cursor-default select-none border-b border-border/50 transition-colors hover:bg-forge-surface/20 ${item.changeOrderId ? "bg-orange-500/[0.04]" : item.bundleId ? "bg-blue-500/[0.025]" : ""}`}
+                  >
+                    {/* Category comes from the product (library / design tools), so it's
+                        shown read-only here rather than as a per-line dropdown. */}
+                    <td className={`py-2 pr-3 text-[13px] text-secondary ${item.bundleId ? "pl-8" : "pl-3"}`}>
+                      <span className="block max-w-[140px] truncate" title={item.category}>{item.category}</span>
+                    </td>
+                    {/* Read-only: double-click the line to edit it in a pop-up. Labor lines have no
+                        system, manufacturer, model or part # — those cells stay empty. */}
+                    <td className="px-1 py-1">{!isLabor && txt(item.system || "—")}</td>
+                    <td className="px-1 py-1">{!isLabor && txt(item.manufacturer)}</td>
+                    <td className="px-1 py-1">{!isLabor && txt(item.model)}</td>
+                    <td className="px-1 py-1">{!isLabor && txt(item.partNumber)}</td>
+                    <td className="px-1 py-1"><span className="block whitespace-normal break-words px-2 py-2 text-[13px] text-secondary">{item.description || "\u00A0"}</span></td>
+                    <td className="px-1 py-1">{txt(item.qty, "text-right text-secondary")}</td>
+                    <td className="px-1 py-1">{txt(fmt(item.unitCost), "text-right text-secondary")}</td>
+                    <td className="px-1 py-1">{txt(itemMargin(item), `text-right ${isOverridden ? "text-secondary" : "italic text-faint"}`)}</td>
+                    <td className="px-1 py-1">{txt(itemMarkup(item), `text-right ${isOverridden ? "text-secondary" : "italic text-faint"}`)}</td>
+                    <td className="px-1 py-1">{txt(fmt(itemPrice(item)), `text-right ${isOverridden ? "text-secondary" : "italic text-faint"}`)}</td>
+                    {showLaborCols && <td className="px-1 py-1">{rowHasLabor(item) && txt(item.laborHours, "text-right text-secondary")}</td>}
+                    {showLaborCols && <td className="px-1 py-1">{rowHasLabor(item) && txt(fmt(item.laborRate), "text-right text-secondary")}</td>}
+                    <td className="px-3 py-2 text-right font-medium text-body">
+                      ${fmt(itemLineTotal(item))}
+                    </td>
+                    <td className="px-2 py-2">
+                      <button
+                        onClick={() => removeItem(section.id, item.id)}
+                        className="rounded p-1 text-faint transition-colors hover:bg-red-500/10 hover:text-red-400"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                          <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                );
+                return (
+                  <Fragment key={item.id}>
+                    {bundleHeader}
+                    {collapsed ? null : row}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-border bg-forge-panel/30">
+                <td colSpan={showLaborCols ? 13 : 11} className="px-3 py-3">
+                  {allowAdd && (
+                    <button
+                      onClick={() => { setShowAddModal(true); setModalSearch(""); setModalTab("library"); }}
+                      className="flex items-center gap-1.5 text-[12px] font-medium text-blue-400 transition-colors hover:text-blue-300"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                      </svg>
+                      Add Line Item
+                    </button>
+                  )}
+                </td>
+                <td className="px-3 py-3 text-right text-sm font-bold text-body">
+                  ${fmt(sectionSubtotalPrice({ items: itemsToShow }))}
+                </td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+    );
+  }
+
+  function addSystem() {
+    const name = newSystemName.trim();
+    if (!name) return;
+    if (!systems.some((s) => s.toLowerCase() === name.toLowerCase())) {
+      setProposal((p) => ({ ...p, systems: [...(p.systems ?? DEFAULT_SYSTEMS), name] }));
+    }
+    setNewSystemName("");
+    setAddingSystem(false);
+  }
+
+  // Removes the system from the list and un-assigns it from any line items
+  // (they stay in their rooms, just no longer grouped).
+  function deleteSystem(name: string) {
+    setProposal((p) => ({
+      ...p,
+      systems: (p.systems ?? DEFAULT_SYSTEMS).filter((s) => s !== name),
+      sections: p.sections.map((s) => ({ ...s, items: s.items.map((i) => (i.system === name ? { ...i, system: "" } : i)) })),
+    }));
+    setSystemView((v) => (v && v !== "all" && v.name === name ? "all" : v));
+    setPendingDeleteSystem(null);
+  }
+
+  function systemTotal(name: string) {
+    return proposal.sections.reduce(
+      (sum, s) => sum + s.items.filter((i) => (i.system || "") === name).reduce((a, i) => a + itemLineTotal(i), 0),
+      0,
+    );
+  }
+
+  // Items grouped by System across every room — the "All Systems" view lists
+  // each system (and anything not yet assigned) with its per-room line items;
+  // picking one system shows just that system's lines.
+  function renderSystemsView() {
+    if (!systemView) return null;
+    const groups = systemView === "all" ? [...systems, ""] : [systemView.name];
+    const rendered = groups.map((sys) => {
+      const perRoom = proposal.sections
+        .map((s) => ({ s, items: s.items.filter((i) => (i.system || "") === sys) }))
+        .filter((x) => x.items.length > 0);
+      if (perRoom.length === 0) return null;
+      return (
+        <div key={sys || "__unassigned"} className="mb-8">
+          <div className="mb-3 flex items-baseline justify-between">
+            <h3 className="text-base font-bold text-heading">{sys || "Unassigned"}</h3>
+            <span className="text-sm font-semibold text-body">${fmt(systemTotal(sys))}</span>
+          </div>
+          {perRoom.map(({ s, items }) => (
+            <div key={s.id} className="mb-4">
+              <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{s.name}</div>
+              {renderItemsTable(s, items, false)}
+            </div>
+          ))}
+        </div>
+      );
+    });
+    return (
+      <div>
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="text-lg font-bold text-heading">{systemView === "all" ? "All Systems" : systemView.name}</h2>
+          <span className="rounded-md bg-forge-surface/60 px-2 py-0.5 text-[11px] text-subtle">Grouped across all rooms</span>
+        </div>
+        {rendered.some(Boolean) ? rendered : (
+          <p className="text-sm text-subtle">
+            {systemView === "all" ? "No line items yet." : "No line items are assigned to this system yet — set a line's System column in its room."}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   const extraSections = proposal.sections.filter((s) => !s.roomId);
 
   const allItems = proposal.sections.flatMap((s) => s.items);
@@ -867,18 +1295,18 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
 
     proposal.sections.forEach((s) => {
       rows.push([s.name]);
-      rows.push(["Category", "Manufacturer", "Model", "Part #", "Description", "Qty", "Price", "Line Total"]);
+      rows.push(["Category", "System", "Manufacturer", "Model", "Part #", "Description", "Qty", "Price", "Line Total"]);
       s.items.forEach((i) => {
-        rows.push([i.category, i.manufacturer, i.model, i.partNumber || "", i.description, String(i.qty), itemPrice(i).toFixed(2), itemLineTotal(i).toFixed(2)]);
+        rows.push([i.category, i.system || "", i.manufacturer, i.model, i.partNumber || "", i.description, String(i.qty), itemPrice(i).toFixed(2), itemLineTotal(i).toFixed(2)]);
       });
-      rows.push(["", "", "", "", "", "", "Section Subtotal", sectionSubtotalPrice(s).toFixed(2)]);
+      rows.push(["", "", "", "", "", "", "", "Section Subtotal", sectionSubtotalPrice(s).toFixed(2)]);
       rows.push([]);
     });
 
-    rows.push(["", "", "", "", "", "", "Equipment Total", totalEquipmentPrice.toFixed(2)]);
-    rows.push(["", "", "", "", "", "", "Labor Total", totalLabor.toFixed(2)]);
-    rows.push(["", "", "", "", "", "", `Tax (${proposal.taxRate}%)`, tax.toFixed(2)]);
-    rows.push(["", "", "", "", "", "", "Grand Total", grandTotal.toFixed(2)]);
+    rows.push(["", "", "", "", "", "", "", "Equipment Total", totalEquipmentPrice.toFixed(2)]);
+    rows.push(["", "", "", "", "", "", "", "Labor Total", totalLabor.toFixed(2)]);
+    rows.push(["", "", "", "", "", "", "", `Tax (${proposal.taxRate}%)`, tax.toFixed(2)]);
+    rows.push(["", "", "", "", "", "", "", "Grand Total", grandTotal.toFixed(2)]);
 
     const csv = rows.map((r) => r.map(csvCell).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -897,9 +1325,16 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
     const preparedDate = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 
     const sectionsHtml = proposal.sections.map((s) => {
+      // Group by System when this section's lines have been assigned to any
+      // (unassigned lines go last); otherwise by category, as before.
+      const bySystem = s.items.some((i) => i.system);
       const groups = new Map<string, LineItem[]>();
-      s.items.forEach((i) => {
-        const key = i.category || "Miscellaneous";
+      const ordered = bySystem
+        ? Array.from(new Set([...systems, ...s.items.map((i) => i.system || ""), ""]))
+            .flatMap((sys) => s.items.filter((i) => (i.system || "") === sys))
+        : s.items;
+      ordered.forEach((i) => {
+        const key = bySystem ? (i.system || "Unassigned") : (i.category || "Miscellaneous");
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key)!.push(i);
       });
@@ -1155,7 +1590,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
               {rooms.map((room) => {
                 const roomName = room.data?.room_name || room.name;
                 const section = proposal.sections.find((s) => s.roomId === room.id);
-                const isActive = !!section && activeSection === section.id;
+                const isActive = !!section && activeSection === section.id && !systemView;
                 return (
                   <div key={room.id} className={`group flex w-full items-center gap-1 rounded-lg pr-1.5 transition-all hover:bg-forge-surface/30 ${isActive ? "bg-forge-surface/60" : ""}`}>
                     {editingRoomId === room.id ? (
@@ -1176,7 +1611,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                     ) : (
                       <>
                         <button
-                          onClick={() => section && setActiveSection(section.id)}
+                          onClick={() => { if (section) { setActiveSection(section.id); setSystemView(null); } }}
                           className={`flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-all ${
                             isActive ? "font-semibold text-heading" : "text-muted hover:text-secondary"
                           }`}
@@ -1220,9 +1655,9 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                 {extraSections.map((s) => (
                   <button
                     key={s.id}
-                    onClick={() => setActiveSection(s.id)}
+                    onClick={() => { setActiveSection(s.id); setSystemView(null); }}
                     className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm transition-all ${
-                      activeSection === s.id
+                      activeSection === s.id && !systemView
                         ? "bg-forge-surface/60 font-semibold text-heading"
                         : "text-muted hover:bg-forge-surface/30 hover:text-secondary"
                     }`}
@@ -1241,6 +1676,63 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
             Add Section
           </button>
+
+          {/* Systems — group equipment by system (Audio, Video, Control…) across
+              rooms. A line's System is set in its row; this lists them with a
+              running total and opens a cross-room view. */}
+          <div className="mb-2 mt-6 flex items-center justify-between px-2">
+            <span className="text-xs font-semibold uppercase tracking-widest text-faint">Systems</span>
+            <button
+              onClick={() => { setAddingSystem(true); setNewSystemName(""); }}
+              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium text-blue-400 transition-colors hover:bg-forge-surface/60 hover:text-blue-300"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              Add System
+            </button>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            <button
+              onClick={() => setSystemView("all")}
+              className={`flex w-full items-center rounded-lg px-3 py-2 text-left text-sm transition-all ${systemView === "all" ? "bg-forge-surface/60 font-semibold text-heading" : "text-muted hover:bg-forge-surface/30 hover:text-secondary"}`}
+            >
+              All Systems
+            </button>
+            {systems.map((sys) => {
+              const active = !!systemView && systemView !== "all" && systemView.name === sys;
+              return (
+                <div key={sys} className={`group flex w-full items-center gap-1 rounded-lg pr-1.5 transition-all hover:bg-forge-surface/30 ${active ? "bg-forge-surface/60" : ""}`}>
+                  <button
+                    onClick={() => setSystemView({ name: sys })}
+                    className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm ${active ? "font-semibold text-heading" : "text-muted hover:text-secondary"}`}
+                  >
+                    <span className="truncate">{sys}</span>
+                    <span className="shrink-0 text-[11px] text-faint">${fmt(systemTotal(sys))}</span>
+                  </button>
+                  <button
+                    onClick={() => setPendingDeleteSystem(sys)}
+                    title="Delete system"
+                    className="shrink-0 rounded-md p-1 text-faint opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+                  </button>
+                </div>
+              );
+            })}
+            {addingSystem && (
+              <input
+                autoFocus
+                value={newSystemName}
+                onChange={(e) => setNewSystemName(e.target.value)}
+                onBlur={() => { if (!newSystemName.trim()) setAddingSystem(false); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); addSystem(); }
+                  if (e.key === "Escape") { setAddingSystem(false); setNewSystemName(""); }
+                }}
+                placeholder="System name…"
+                className="mx-1 mt-1 rounded-md border border-blue-400/50 bg-forge-surface px-2 py-1 text-sm text-heading outline-none"
+              />
+            )}
+          </div>
 
           {/* Default Margin % — used by any line item that doesn't have its
               own Margin/Markup override (see the item table's own columns),
@@ -1284,7 +1776,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
 
         {/* Main content */}
         <div className="flex-1 overflow-y-auto p-6">
-          {currentSection ? (
+          {systemView ? renderSystemsView() : currentSection ? (
             <div>
               {/* Section header */}
               <div className="mb-5 flex items-center justify-between">
@@ -1323,193 +1815,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                 </div>
               </div>
 
-              {/* Line items table */}
-              <div className="overflow-x-auto rounded-xl border border-border">
-                <table className="w-full text-left text-[13px]">
-                  <thead>
-                    <tr className="border-b border-border bg-forge-panel/60 text-[11px] font-semibold uppercase tracking-wider text-subtle">
-                      <th className="px-3 py-3">Category</th>
-                      <th className="px-3 py-3">Manufacturer</th>
-                      <th className="px-3 py-3">Model</th>
-                      <th className="px-3 py-3">Part #</th>
-                      <th className="px-3 py-3 min-w-[200px]">Description</th>
-                      <th className="px-3 py-3 text-right">Qty</th>
-                      <th className="px-3 py-3 text-right">Unit Cost</th>
-                      <th className="px-3 py-3 text-right">Margin %</th>
-                      <th className="px-3 py-3 text-right">Markup %</th>
-                      <th className="px-3 py-3 text-right">Unit Price</th>
-                      <th className="px-3 py-3 text-right">Labor Hrs</th>
-                      <th className="px-3 py-3 text-right">Labor Rate</th>
-                      <th className="px-3 py-3 text-right">Line Total</th>
-                      <th className="w-10 px-2 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {currentSection.items.map((item) => {
-                      const isOverridden = item.margin != null || item.markup != null;
-                      const itemCO = item.changeOrderId ? changeOrders.find((c) => c.id === item.changeOrderId) : null;
-                      return (
-                        <tr
-                          key={item.id}
-                          className={`border-b border-border/50 transition-colors hover:bg-forge-surface/20 ${item.changeOrderId ? "bg-orange-500/[0.04]" : ""}`}
-                          title={itemCO ? `Added by Change Order: ${itemCO.title}` : undefined}
-                        >
-                          <td className="px-1 py-1">
-                            <select
-                              value={item.category}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "category", e.target.value)}
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
-                            >
-                              {CATEGORIES.map((c) => (
-                                <option key={c} value={c} className="bg-forge-bg">{c}</option>
-                              ))}
-                              {!CATEGORIES.includes(item.category) && (
-                                <option value={item.category} className="bg-forge-bg">{item.category}</option>
-                              )}
-                            </select>
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              value={item.manufacturer}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "manufacturer", e.target.value)}
-                              placeholder="e.g. Crestron"
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-[13px] text-secondary outline-none placeholder:text-faint focus:ring-1 focus:ring-blue-500/40"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              value={item.model}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "model", e.target.value)}
-                              placeholder="Model #"
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-[13px] text-secondary outline-none placeholder:text-faint focus:ring-1 focus:ring-blue-500/40"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              value={item.partNumber || ""}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "partNumber", e.target.value)}
-                              placeholder="Part #"
-                              className="w-full rounded border-none bg-transparent px-2 py-2 font-mono text-[12.5px] text-secondary outline-none placeholder:text-faint placeholder:font-sans focus:ring-1 focus:ring-blue-500/40"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              value={item.description}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "description", e.target.value)}
-                              placeholder="Item description"
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-[13px] text-secondary outline-none placeholder:text-faint focus:ring-1 focus:ring-blue-500/40"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={item.qty}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "qty", parseInt(e.target.value) || 0)}
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
-                              min="0"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={item.unitCost}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "unitCost", parseFloat(e.target.value) || 0)}
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
-                              min="0"
-                              step="0.01"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={itemMargin(item)}
-                              onChange={(e) => updateItemMargin(currentSection.id, item.id, e.target.value)}
-                              title={isOverridden ? undefined : "Using the proposal's default Margin %"}
-                              className={`w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] outline-none focus:ring-1 focus:ring-blue-500/40 ${isOverridden ? "text-secondary" : "italic text-faint"}`}
-                              step="0.1"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={itemMarkup(item)}
-                              onChange={(e) => updateItemMarkup(currentSection.id, item.id, e.target.value)}
-                              title={isOverridden ? undefined : "Using the proposal's default Margin %"}
-                              className={`w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] outline-none focus:ring-1 focus:ring-blue-500/40 ${isOverridden ? "text-secondary" : "italic text-faint"}`}
-                              step="0.1"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={itemPrice(item)}
-                              onChange={(e) => updateItemPrice(currentSection.id, item.id, e.target.value)}
-                              title={isOverridden ? undefined : "Using the proposal's default Margin %"}
-                              className={`w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] outline-none focus:ring-1 focus:ring-blue-500/40 ${isOverridden ? "text-secondary" : "italic text-faint"}`}
-                              min="0"
-                              step="0.01"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={item.laborHours}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "laborHours", parseFloat(e.target.value) || 0)}
-                              title="Hours billed independently of Qty/Unit Price — see Labor Total"
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
-                              min="0"
-                              step="0.25"
-                            />
-                          </td>
-                          <td className="px-1 py-1">
-                            <input
-                              type="number"
-                              value={item.laborRate}
-                              onChange={(e) => updateItem(currentSection.id, item.id, "laborRate", parseFloat(e.target.value) || 0)}
-                              className="w-full rounded border-none bg-transparent px-2 py-2 text-right text-[13px] text-secondary outline-none focus:ring-1 focus:ring-blue-500/40"
-                              min="0"
-                              step="0.01"
-                            />
-                          </td>
-                          <td className="px-3 py-2 text-right font-medium text-body">
-                            ${fmt(itemLineTotal(item))}
-                          </td>
-                          <td className="px-2 py-2">
-                            <button
-                              onClick={() => removeItem(currentSection.id, item.id)}
-                              className="rounded p-1 text-faint transition-colors hover:bg-red-500/10 hover:text-red-400"
-                            >
-                              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                              </svg>
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t border-border bg-forge-panel/30">
-                      <td colSpan={9} className="px-3 py-3">
-                        <button
-                          onClick={() => { setShowAddModal(true); setModalSearch(""); setModalTab("library"); }}
-                          className="flex items-center gap-1.5 text-[12px] font-medium text-blue-400 transition-colors hover:text-blue-300"
-                        >
-                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                          </svg>
-                          Add Line Item
-                        </button>
-                      </td>
-                      <td className="px-3 py-3 text-right text-sm font-bold text-body">
-                        ${fmt(sectionSubtotalPrice(currentSection))}
-                      </td>
-                      <td />
-                      <td />
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
+              {renderItemsTable(currentSection, currentSection.items, true)}
 
               {/* Scope of Work */}
               <div className="mt-8">
@@ -1569,7 +1875,7 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
           <div className="relative w-full max-w-[680px] rounded-2xl border border-border bg-forge-bg shadow-2xl shadow-black/50">
             {/* Modal header */}
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
-              <h2 className="text-lg font-bold text-heading">Add Equipment</h2>
+              <h2 className="text-lg font-bold text-heading">Add Equipment, Labor or Bundle</h2>
               <button
                 onClick={() => setShowAddModal(false)}
                 className="p-1 text-subtle transition-colors hover:text-secondary"
@@ -1624,12 +1930,28 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
                   </div>
 
                   {/* Results */}
-                  {filteredLibrary.length === 0 && filteredLaborLibrary.length === 0 ? (
+                  {filteredLibrary.length === 0 && filteredLaborLibrary.length === 0 && filteredBundles.length === 0 ? (
                     <div className="py-10 text-center text-sm text-subtle">
-                      No equipment or labor found. Try a different search or create a new item.
+                      No equipment, labor or bundles found. Try a different search or create a new item.
                     </div>
                   ) : (
                     <div className="flex flex-col gap-1">
+                      {filteredBundles.map((b) => (
+                        <button
+                          key={b.id}
+                          onClick={() => addBundle(b)}
+                          className="flex items-center justify-between rounded-lg px-4 py-3 text-left transition-all hover:bg-forge-surface/40"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[13px] font-semibold text-body">{b.name}</span>
+                              <span className="rounded bg-blue-500/15 px-1.5 py-0.5 text-[10px] text-blue-300">Bundle</span>
+                            </div>
+                            {b.description && <p className="mt-0.5 truncate text-[12px] text-subtle">{b.description}</p>}
+                          </div>
+                          <span className="ml-4 shrink-0 text-[12px] text-secondary">{b.items.length} item{b.items.length === 1 ? "" : "s"}</span>
+                        </button>
+                      ))}
                       {filteredLaborLibrary.map((entry) => (
                         <button
                           key={entry.id}
@@ -1767,6 +2089,27 @@ export default function ProposalPage({ params }: { params: { id: string } }) {
           busy={resyncing}
           onCancel={() => setPendingResync(null)}
           onConfirm={confirmResync}
+        />
+      )}
+
+      {lineModal && (
+        <LineItemModal
+          key={lineModal.item.id}
+          item={lineModal.item}
+          systems={systems}
+          defaultMargin={proposal.marginPercent}
+          onSave={saveLineModal}
+          onClose={() => setLineModal(null)}
+        />
+      )}
+
+      {pendingDeleteSystem && (
+        <ConfirmDialog
+          title="Delete System"
+          message={<>Delete <span className="font-semibold text-heading">{pendingDeleteSystem}</span>? Its line items stay in their rooms but are no longer assigned to a system.</>}
+          confirmLabel="Delete"
+          onCancel={() => setPendingDeleteSystem(null)}
+          onConfirm={() => deleteSystem(pendingDeleteSystem)}
         />
       )}
 

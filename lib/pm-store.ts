@@ -111,6 +111,7 @@ export interface BoardCard {
   color?: string;
   description?: string;
   descriptionShown?: boolean;
+  dueDate?: string; // YYYY-MM-DD
   subtasks?: BoardSubtask[];
 }
 
@@ -142,6 +143,8 @@ export interface AdHocTask {
   id: string;
   name: string;
   createdAt: string;
+  /** Set when the task is deleted: hidden from pickers/search, but past logged hours keep their name. */
+  archivedAt?: string;
 }
 
 export interface PMStore {

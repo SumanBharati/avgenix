@@ -157,8 +157,8 @@ const NEWS_TYPE_STYLE: Record<string, string> = {
 const CARDS: { key: Section; label: string; description: string; icon: React.ReactNode; iconBg: string; iconColor: string; stat?: string }[] = [
   {
     key: "org",
-    label: "My Organization's Library",
-    description: "Curated catalog of approved equipment specific to your organization.",
+    label: "My Library",
+    description: "Curated catalog of approved equipment and labor for you.",
     icon: <BuildingIcon size={28} />,
     iconBg: "bg-violet-500/10",
     iconColor: "text-violet-400",
@@ -230,7 +230,7 @@ function LandingView({ onSelect }: { onSelect: (s: Section) => void }) {
     <div className="animate-fade-in px-4 py-6 sm:px-6 lg:px-8">
       <div className="mb-8">
         <h2 className="text-xl font-bold text-heading">Library</h2>
-        <p className="mt-1 text-[13px] text-muted">Browse equipment catalogs and manage your organization's stock.</p>
+        <p className="mt-1 text-[13px] text-muted">Browse equipment & labor catalogs and manage your organization's stock.</p>
       </div>
 
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -828,6 +828,7 @@ function AVGenixLibraryView({ onBack }: { onBack: () => void }) {
   // The shared catalog is read-only for everyone but library admins; the
   // database enforces it, this just hides the controls that would fail.
   const { isLibraryAdmin } = useLibraryAdmin();
+  const [libView, setLibView] = useState<"equipment" | "labor">("equipment");
   const [products, setProducts] = useState<AVProduct[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -1255,7 +1256,7 @@ function AVGenixLibraryView({ onBack }: { onBack: () => void }) {
             Library
           </button>
           <span className="text-border">/</span>
-          <h2 className="text-xl font-bold text-heading">AVGenix Equipment Library</h2>
+          <h2 className="text-xl font-bold text-heading">AVGenix Library</h2>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[12px] text-subtle">{total} products</span>
@@ -1284,6 +1285,26 @@ function AVGenixLibraryView({ onBack }: { onBack: () => void }) {
         </div>
       </div>
 
+      {/* Equipment / Labor tabs */}
+      <div className="mb-4 inline-flex rounded-lg border border-border bg-forge-surface/40 p-1">
+        <button
+          onClick={() => setLibView("equipment")}
+          className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${libView === "equipment" ? "bg-forge-panel text-heading shadow-sm" : "text-muted hover:text-body"}`}
+        >
+          Equipment · {total}
+        </button>
+        <button
+          onClick={() => setLibView("labor")}
+          className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${libView === "labor" ? "bg-forge-panel text-heading shadow-sm" : "text-muted hover:text-body"}`}
+        >
+          Labor · {DEFAULT_LABOR_RATE_TYPES.length}
+        </button>
+      </div>
+
+      {libView === "labor" ? (
+        <StandardLaborView />
+      ) : (
+      <>
       {/* Filters */}
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 max-w-xs">
@@ -1451,6 +1472,8 @@ function AVGenixLibraryView({ onBack }: { onBack: () => void }) {
             {loadingMore ? "Loading…" : `Load ${Math.min(LIBRARY_PAGE_SIZE, total - products.length)} more`}
           </button>
         </div>
+      )}
+      </>
       )}
 
       {/* Detail modal */}
@@ -1961,6 +1984,20 @@ type LaborItem = {
   cost: number;
 };
 
+// A Bundle — a named set of this org's own library items (equipment or labor)
+// with a quantity each (units, or hours for labor), saved once and addable to
+// any future proposal. See migration 051_bundle_library.sql.
+type BundleItemRef = { kind: "equipment" | "labor"; id: string; qty: number };
+type BundleRow = { id: string; org_id: string; user_id: string; name: string; description: string; items: BundleItemRef[] };
+type BundleDraft = { id?: string; name: string; description: string; items: BundleItemRef[] };
+
+function friendlyBundleError(message: string): string {
+  if (/bundle_library|schema cache|does not exist/i.test(message)) {
+    return "Bundles aren't set up in the database yet — run migration 051_bundle_library.sql in Supabase, then reload.";
+  }
+  return message;
+}
+
 function OrgLibraryView({ onBack }: { onBack: () => void }) {
   const { activeOrg } = useOrg();
   const [items, setItems] = useState<OrgEquipmentItem[]>([]);
@@ -1984,7 +2021,15 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
   // Equipment vs. Labor — same page, structurally different tables (see
   // LaborItem above), so they get their own tab rather than sharing columns
   // that mostly wouldn't apply to one or the other.
-  const [libView, setLibView] = useState<"equipment" | "labor">("equipment");
+  const [libView, setLibView] = useState<"equipment" | "labor" | "bundles">("equipment");
+  const [bundles, setBundles] = useState<BundleRow[]>([]);
+  const [bundlesLoading, setBundlesLoading] = useState(true);
+  const [bundlesError, setBundlesError] = useState<string | null>(null);
+  const [bundleDraft, setBundleDraft] = useState<BundleDraft | null>(null);
+  const [savingBundle, setSavingBundle] = useState(false);
+  const [bundleSaveError, setBundleSaveError] = useState<string | null>(null);
+  const [deleteBundleConfirm, setDeleteBundleConfirm] = useState<BundleRow | null>(null);
+  const [deletingBundle, setDeletingBundle] = useState(false);
   const [laborItems, setLaborItems] = useState<LaborItem[]>([]);
   const [laborLoading, setLaborLoading] = useState(true);
   const [laborSearch, setLaborSearch] = useState("");
@@ -2027,6 +2072,68 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
         setLaborLoading(false);
       });
   }, [activeOrg?.id]);
+
+  useEffect(() => {
+    if (!activeOrg) { setBundlesLoading(false); return; }
+    setBundlesLoading(true);
+    supabase
+      .from("bundle_library")
+      .select("*")
+      .eq("org_id", activeOrg.id)
+      .order("name")
+      .then(({ data, error }) => {
+        if (error) { setBundlesError(friendlyBundleError(error.message)); setBundles([]); }
+        else { setBundlesError(null); setBundles((data as BundleRow[]) ?? []); }
+        setBundlesLoading(false);
+      });
+  }, [activeOrg?.id]);
+
+  function openNewBundle() {
+    setLibView("bundles");
+    setBundleSaveError(null);
+    setBundleDraft({ name: "", description: "", items: [] });
+  }
+
+  function openEditBundle(b: BundleRow) {
+    setBundleSaveError(null);
+    setBundleDraft({ id: b.id, name: b.name, description: b.description || "", items: b.items.map((i) => ({ ...i })) });
+  }
+
+  async function saveBundle() {
+    if (!bundleDraft || !activeOrg) return;
+    const name = bundleDraft.name.trim();
+    if (!name || bundleDraft.items.length === 0) return;
+    setSavingBundle(true);
+    setBundleSaveError(null);
+    const payload = { name, description: bundleDraft.description.trim(), items: bundleDraft.items, updated_at: new Date().toISOString() };
+    if (bundleDraft.id) {
+      const { error } = await supabase.from("bundle_library").update(payload).eq("id", bundleDraft.id);
+      if (error) { setBundleSaveError(friendlyBundleError(error.message)); setSavingBundle(false); return; }
+      setBundles((prev) => prev.map((b) => (b.id === bundleDraft.id ? { ...b, ...payload } : b)).sort((a, b) => a.name.localeCompare(b.name)));
+    } else {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setBundleSaveError("Not signed in."); setSavingBundle(false); return; }
+      const { data, error } = await supabase
+        .from("bundle_library")
+        .insert({ org_id: activeOrg.id, user_id: user.id, ...payload })
+        .select("*")
+        .single();
+      if (error) { setBundleSaveError(friendlyBundleError(error.message)); setSavingBundle(false); return; }
+      setBundlesError(null);
+      setBundles((prev) => [...prev, data as BundleRow].sort((a, b) => a.name.localeCompare(b.name)));
+    }
+    setSavingBundle(false);
+    setBundleDraft(null);
+  }
+
+  async function confirmDeleteBundle() {
+    if (!deleteBundleConfirm) return;
+    setDeletingBundle(true);
+    await supabase.from("bundle_library").delete().eq("id", deleteBundleConfirm.id);
+    setBundles((prev) => prev.filter((b) => b.id !== deleteBundleConfirm.id));
+    setDeletingBundle(false);
+    setDeleteBundleConfirm(null);
+  }
 
   // Fetches the org's current standard Labor Rates fresh from the DB and
   // returns them (also updating state for the dropdown to render from).
@@ -2313,7 +2420,7 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
             Library
           </button>
           <span className="text-border">/</span>
-          <h2 className="text-xl font-bold text-heading">My Organization&apos;s Equipment Library</h2>
+          <h2 className="text-xl font-bold text-heading">My Library</h2>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -2336,6 +2443,17 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
             </svg>
             Add Labor
           </button>
+          <button
+            type="button"
+            onClick={openNewBundle}
+            className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2.5 text-[13px] font-semibold text-white transition-colors hover:bg-violet-500"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Bundle
+          </button>
         </div>
       </div>
 
@@ -2353,9 +2471,26 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
         >
           Labor · {laborItems.length}
         </button>
+        <button
+          onClick={() => setLibView("bundles")}
+          className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors ${libView === "bundles" ? "bg-forge-panel text-heading shadow-sm" : "text-muted hover:text-body"}`}
+        >
+          Bundles · {bundles.length}
+        </button>
       </div>
 
-      {libView === "labor" ? (
+      {libView === "bundles" ? (
+      <BundlesTable
+        bundles={bundles}
+        loading={bundlesLoading}
+        error={bundlesError}
+        equipment={items}
+        labor={laborItems}
+        onAddFirst={openNewBundle}
+        onEdit={openEditBundle}
+        onDelete={setDeleteBundleConfirm}
+      />
+      ) : libView === "labor" ? (
       <LaborTable
         items={laborFiltered}
         totalCount={laborItems.length}
@@ -2703,6 +2838,31 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
         </div>
       )}
 
+      {/* Add / Edit Bundle */}
+      {bundleDraft && (
+        <BundleModal
+          draft={bundleDraft}
+          equipment={items}
+          labor={laborItems}
+          saving={savingBundle}
+          error={bundleSaveError}
+          onChange={setBundleDraft}
+          onSave={saveBundle}
+          onClose={() => { setBundleDraft(null); setBundleSaveError(null); }}
+        />
+      )}
+
+      {/* Delete Bundle confirmation */}
+      {deleteBundleConfirm && (
+        <ConfirmDialog
+          title="Delete bundle?"
+          message={<>Delete <span className="font-semibold text-heading">{deleteBundleConfirm.name}</span>? Proposals that already used it keep their lines; it just won&apos;t be available to add anymore.</>}
+          confirmLabel={deletingBundle ? "Deleting…" : "Delete"}
+          onCancel={() => setDeleteBundleConfirm(null)}
+          onConfirm={confirmDeleteBundle}
+        />
+      )}
+
       {/* Delete Labor confirmation */}
       {deleteLaborConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -2729,6 +2889,250 @@ function OrgLibraryView({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Quantity box that keeps what you type (no stuck leading 0 when clearing it);
+// an empty/zero entry snaps back to the minimum when you leave the field.
+function QtyInput({ value, min, step, onChange }: { value: number; min: number; step: number; onChange: (n: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    if ((parseFloat(text) || 0) !== value) setText(String(value));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return (
+    <input
+      type="number" min={min} step={step}
+      value={text}
+      onChange={(e) => { setText(e.target.value); const n = parseFloat(e.target.value); if (n > 0) onChange(n); }}
+      onBlur={() => { if (!(parseFloat(text) > 0)) { setText(String(min)); onChange(min); } }}
+      className="forge-input w-20 text-right text-[12px]"
+    />
+  );
+}
+
+function BundlesTable({ bundles, loading, error, equipment, labor, onAddFirst, onEdit, onDelete }: {
+  bundles: BundleRow[];
+  loading: boolean;
+  error: string | null;
+  equipment: OrgEquipmentItem[];
+  labor: LaborItem[];
+  onAddFirst: () => void;
+  onEdit: (b: BundleRow) => void;
+  onDelete: (b: BundleRow) => void;
+}) {
+  const label = (r: BundleItemRef) => {
+    if (r.kind === "labor") return labor.find((l) => l.id === r.id)?.label;
+    const e = equipment.find((x) => x.id === r.id);
+    return e ? `${e.manufacturer} ${e.model}`.trim() : undefined;
+  };
+  return (
+    <div className="rounded-xl border border-border bg-forge-surface/20 overflow-hidden">
+      {error && <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2.5 text-[12px] text-red-400">{error}</div>}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[560px]">
+          <thead>
+            <tr className="border-b border-border bg-forge-surface/60">
+              <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted">Bundle</th>
+              <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted">Contents</th>
+              <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Items</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={4} className="px-4 py-16 text-center text-[13px] text-subtle">Loading…</td></tr>
+            ) : bundles.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-4 py-16 text-center text-[13px] text-subtle">
+                  No bundles yet.{" "}
+                  <button onClick={onAddFirst} className="text-violet-400 hover:text-violet-300 transition-colors">Create your first bundle</button>
+                  {" "}— a saved set of equipment and labor you can add to any proposal in one click.
+                </td>
+              </tr>
+            ) : (
+              bundles.map((b) => {
+                const names = b.items.map(label).filter(Boolean) as string[];
+                return (
+                  <tr key={b.id} onDoubleClick={() => onEdit(b)} className="border-b border-border/50 transition-colors hover:bg-forge-surface/40">
+                    <td className="px-4 py-3">
+                      <div className="text-[13px] font-semibold text-heading">{b.name}</div>
+                      {b.description && <div className="text-[11px] text-subtle">{b.description}</div>}
+                    </td>
+                    <td className="max-w-[420px] truncate px-4 py-3 text-[12px] text-body" title={names.join(", ")}>
+                      {names.length ? names.join(", ") : <span className="text-faint">—</span>}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-[12px] text-body">{b.items.length}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-1">
+                        <button onClick={() => onEdit(b)} title="Edit" className="rounded-md p-1.5 text-muted transition-colors hover:bg-forge-surface hover:text-heading">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                        <button onClick={() => onDelete(b)} title="Delete" className="rounded-md p-1.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-400">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                            <path d="M10 11v6M14 11v6" />
+                            <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                          </svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function BundleModal({ draft, equipment, labor, saving, error, onChange, onSave, onClose }: {
+  draft: BundleDraft;
+  equipment: OrgEquipmentItem[];
+  labor: LaborItem[];
+  saving: boolean;
+  error: string | null;
+  onChange: (d: BundleDraft) => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const q = search.trim().toLowerCase();
+  const eqMatches = equipment.filter((e) => !q || e.manufacturer.toLowerCase().includes(q) || e.model.toLowerCase().includes(q) || (e.description || "").toLowerCase().includes(q) || (e.category || "").toLowerCase().includes(q));
+  const laborMatches = labor.filter((l) => !q || l.label.toLowerCase().includes(q));
+
+  function addItem(kind: BundleItemRef["kind"], id: string) {
+    const existing = draft.items.find((i) => i.kind === kind && i.id === id);
+    onChange({
+      ...draft,
+      items: existing
+        ? draft.items.map((i) => (i === existing ? { ...i, qty: i.qty + 1 } : i))
+        : [...draft.items, { kind, id, qty: 1 }],
+    });
+  }
+  function setQty(index: number, qty: number) {
+    onChange({ ...draft, items: draft.items.map((i, n) => (n === index ? { ...i, qty } : i)) });
+  }
+  function removeAt(index: number) {
+    onChange({ ...draft, items: draft.items.filter((_, n) => n !== index) });
+  }
+  const describe = (r: BundleItemRef) => {
+    if (r.kind === "labor") return labor.find((l) => l.id === r.id)?.label ?? "Removed labor item";
+    const e = equipment.find((x) => x.id === r.id);
+    return e ? `${e.manufacturer} ${e.model}`.trim() : "Removed equipment item";
+  };
+  const canSave = draft.name.trim() !== "" && draft.items.length > 0 && !saving;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-2xl border border-border bg-forge-bg shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-6 py-4">
+          <h3 className="text-[15px] font-bold text-heading">{draft.id ? "Edit Bundle" : "Add Bundle"}</h3>
+          <button onClick={onClose} className="text-muted transition-colors hover:text-heading">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="shrink-0 space-y-3 border-b border-border px-6 py-4">
+          <input
+            value={draft.name}
+            onChange={(e) => onChange({ ...draft, name: e.target.value })}
+            placeholder="Bundle name, e.g. Huddle Room Package"
+            className="forge-input w-full text-[13px]"
+            autoFocus
+          />
+          <input
+            value={draft.description}
+            onChange={(e) => onChange({ ...draft, description: e.target.value })}
+            placeholder="Description (optional)"
+            className="forge-input w-full text-[13px]"
+          />
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 overflow-hidden md:grid-cols-2">
+          {/* Pick items */}
+          <div className="flex min-h-0 flex-col border-b border-border md:border-b-0 md:border-r">
+            <div className="shrink-0 px-6 pt-4">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">Add from My Library</div>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search equipment and labor…"
+                className="forge-input mb-3 w-full text-[13px]"
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4" style={{ maxHeight: "44vh" }}>
+              {laborMatches.length === 0 && eqMatches.length === 0 ? (
+                <div className="px-3 py-8 text-center text-[13px] text-subtle">
+                  {equipment.length === 0 && labor.length === 0 ? "Your library is empty — add equipment or labor first." : "Nothing matches."}
+                </div>
+              ) : (
+                <>
+                  {laborMatches.map((l) => (
+                    <button key={l.id} onClick={() => addItem("labor", l.id)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors hover:bg-forge-surface/50">
+                      <span className="flex items-center gap-2">
+                        <span className="text-[13px] font-semibold text-body">{l.label}</span>
+                        <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">Labor</span>
+                      </span>
+                      <span className="text-[12px] text-blue-400">+ Add</span>
+                    </button>
+                  ))}
+                  {eqMatches.map((e) => (
+                    <button key={e.id} onClick={() => addItem("equipment", e.id)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors hover:bg-forge-surface/50">
+                      <span className="min-w-0">
+                        <span className="text-[13px] font-semibold text-body">{e.manufacturer}</span>{" "}
+                        <span className="text-[13px] text-muted">{e.model}</span>
+                        {e.description && <span className="block truncate text-[11px] text-subtle">{e.description}</span>}
+                      </span>
+                      <span className="ml-3 shrink-0 text-[12px] text-blue-400">+ Add</span>
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* What's in the bundle */}
+          <div className="flex min-h-0 flex-col">
+            <div className="shrink-0 px-6 pt-4 text-[11px] font-semibold uppercase tracking-wider text-faint">In this bundle · {draft.items.length}</div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-4 pt-2" style={{ maxHeight: "44vh" }}>
+              {draft.items.length === 0 ? (
+                <div className="py-8 text-center text-[13px] text-subtle">Click + Add on the left to put items in this bundle.</div>
+              ) : (
+                draft.items.map((r, n) => (
+                  <div key={`${r.kind}-${r.id}`} className="flex items-center gap-2 border-b border-border/50 py-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] text-body">{describe(r)}</div>
+                      {r.kind === "labor" && <div className="text-[10px] uppercase tracking-wider text-violet-300">Labor · hours</div>}
+                    </div>
+                    <QtyInput value={r.qty} min={r.kind === "labor" ? 0.25 : 1} step={r.kind === "labor" ? 0.25 : 1} onChange={(v) => setQty(n, v)} />
+                    <button onClick={() => removeAt(n)} title="Remove" className="rounded-md p-1.5 text-muted transition-colors hover:bg-red-500/10 hover:text-red-400">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-6 py-4">
+          <p className="min-w-0 flex-1 text-[12px] text-red-400">{error}</p>
+          <button onClick={onClose} className="rounded-lg border border-border px-4 py-2 text-[13px] font-medium text-muted transition-colors hover:text-body">Cancel</button>
+          <button onClick={onSave} disabled={!canSave} className="rounded-lg bg-violet-600 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
+            {saving ? "Saving…" : "Save Bundle"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2819,6 +3223,150 @@ function LaborTable({ items, totalCount, loading, search, onSearchChange, onAddF
                             </svg>
                           </button>
                         </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── AVGenix Library → Labor ──────────────────────────────────────────────────
+// Labor rates are per organization, so there's no shared labor catalog to
+// browse. This lists the standard labor types as templates: "Add to My
+// Library" copies one into the org's labor_library with the rate/cost entered
+// here — prefilled from Account Settings → Labor Rates and Costs when a type
+// with the same label is configured there.
+function StandardLaborView() {
+  const { activeOrg } = useOrg();
+  const [search, setSearch] = useState("");
+  const [inputs, setInputs] = useState<Record<string, { rate: string; cost: string }>>({});
+  const [inLibrary, setInLibrary] = useState<Set<string>>(new Set());
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeOrg) return;
+    let cancelled = false;
+    Promise.all([
+      supabase.from("organizations").select("labor_line_items").eq("id", activeOrg.id).single(),
+      supabase.from("labor_library").select("label").eq("org_id", activeOrg.id),
+    ]).then(([{ data: org }, { data: lib }]) => {
+      if (cancelled) return;
+      const configured: LaborRateType[] = Array.isArray(org?.labor_line_items) ? org.labor_line_items : [];
+      const next: Record<string, { rate: string; cost: string }> = {};
+      DEFAULT_LABOR_RATE_TYPES.forEach((t) => {
+        const match = configured.find((c) => c.label.trim().toLowerCase() === t.label.toLowerCase());
+        next[t.key] = { rate: match?.rate ? String(match.rate) : "", cost: match?.cost ? String(match.cost) : "" };
+      });
+      setInputs(next);
+      setInLibrary(new Set((lib ?? []).map((l: { label: string }) => l.label.trim().toLowerCase())));
+    });
+    return () => { cancelled = true; };
+  }, [activeOrg?.id]);
+
+  async function addToLibrary(type: LaborRateType) {
+    if (!activeOrg) return;
+    const rate = parseFloat(inputs[type.key]?.rate ?? "");
+    const cost = parseFloat(inputs[type.key]?.cost ?? "") || 0;
+    if (!(rate > 0)) { setError(`Enter a billing rate for ${type.label} before adding it.`); return; }
+    setError(null);
+    setBusyKey(type.key);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setError("Not signed in."); setBusyKey(null); return; }
+    const { error: insertError } = await supabase
+      .from("labor_library")
+      .insert({ org_id: activeOrg.id, user_id: user.id, label: type.label, rate, cost });
+    if (insertError) setError(insertError.message);
+    else setInLibrary((prev) => new Set(prev).add(type.label.trim().toLowerCase()));
+    setBusyKey(null);
+  }
+
+  const q = search.trim().toLowerCase();
+  const types = DEFAULT_LABOR_RATE_TYPES.filter((t) => !q || t.label.toLowerCase().includes(q));
+
+  return (
+    <>
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 max-w-xs">
+          <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-faint" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search labor types…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="forge-input w-full pl-8 text-[13px]"
+          />
+        </div>
+        <span className="text-[12px] text-subtle">Standard labor types — set your rate, then add to My Library.</span>
+        <span className="ml-auto text-[12px] text-subtle">{types.length} of {DEFAULT_LABOR_RATE_TYPES.length} types</span>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-500/20 bg-red-500/10 px-3.5 py-2 text-[12px] text-red-400">{error}</div>
+      )}
+
+      <div className="rounded-xl border border-border bg-forge-surface/20 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[560px]">
+            <thead>
+              <tr className="border-b border-border bg-forge-surface/60">
+                <th className="px-4 py-3 text-left text-[11px] font-semibold text-muted">Labor Type</th>
+                <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Billing Rate ($/hr)</th>
+                <th className="px-4 py-3 text-right text-[11px] font-semibold text-muted">Your Cost ($/hr)</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {types.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-4 py-16 text-center text-[13px] text-subtle">No labor types found.</td>
+                </tr>
+              ) : (
+                types.map((t) => {
+                  const added = inLibrary.has(t.label.trim().toLowerCase());
+                  return (
+                    <tr key={t.key} className="border-b border-border/50 transition-colors hover:bg-forge-surface/40">
+                      <td className="px-4 py-3 text-[13px] font-semibold text-heading">{t.label}</td>
+                      <td className="px-4 py-2 text-right">
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={inputs[t.key]?.rate ?? ""}
+                          onChange={(e) => setInputs((p) => ({ ...p, [t.key]: { rate: e.target.value, cost: p[t.key]?.cost ?? "" } }))}
+                          disabled={added}
+                          placeholder="0.00"
+                          className="forge-input w-28 text-right text-[12px] disabled:opacity-50"
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={inputs[t.key]?.cost ?? ""}
+                          onChange={(e) => setInputs((p) => ({ ...p, [t.key]: { rate: p[t.key]?.rate ?? "", cost: e.target.value } }))}
+                          disabled={added}
+                          placeholder="0.00"
+                          className="forge-input w-28 text-right text-[12px] disabled:opacity-50"
+                        />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {added ? (
+                          <span className="text-[12px] font-medium text-emerald-400">In My Library</span>
+                        ) : (
+                          <button
+                            onClick={() => addToLibrary(t)}
+                            disabled={busyKey === t.key}
+                            className="rounded-lg bg-violet-600 px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
+                          >
+                            {busyKey === t.key ? "Adding…" : "Add to My Library"}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );

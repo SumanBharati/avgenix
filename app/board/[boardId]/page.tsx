@@ -411,6 +411,18 @@ export default function BoardDetailPage({ params }: { params: { boardId: string 
                       {card.descriptionShown && <div className="whitespace-pre-wrap break-words rounded border border-border/60 bg-forge-bg/40 px-2 py-1.5 text-[12px] leading-snug text-muted">{card.description}</div>}
                     </div>
                   )}
+                  {card.dueDate && editingCard?.cardId !== card.id && (() => {
+                    const today = new Date(); today.setHours(0, 0, 0, 0);
+                    const due = new Date(`${card.dueDate}T00:00:00`);
+                    const days = Math.round((due.getTime() - today.getTime()) / 86400000);
+                    const tone = days < 0 ? "bg-red-500/15 text-red-400" : days <= 2 ? "bg-amber-500/15 text-amber-400" : "bg-forge-card text-muted";
+                    return (
+                      <div className={`mt-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${tone}`}>
+                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.3" /><path d="M2 7h12M5 1.5V4M11 1.5V4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
+                        {due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </div>
+                    );
+                  })()}
                   {(card.subtasks?.length ?? 0) > 0 && editingCard?.cardId !== card.id && (
                     <div className="mt-1.5 flex items-center gap-1.5">
                       <div className="h-1 flex-1 overflow-hidden rounded-full bg-forge-card">
@@ -509,6 +521,20 @@ export default function BoardDetailPage({ params }: { params: { boardId: string 
                     placeholder="Add a description…"
                     className="w-full resize-none rounded-lg border border-border bg-forge-surface px-3 py-2 text-[13px] text-body outline-none focus:border-blue-500/60 placeholder:text-faint"
                   />
+                </div>
+                <div>
+                  <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-subtle">Due date</div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      value={card.dueDate ?? ""}
+                      onChange={(e) => updateCard(columnId, card.id, { dueDate: e.target.value || undefined })}
+                      className="rounded-lg border border-border bg-forge-surface px-3 py-1.5 text-[13px] text-body outline-none focus:border-blue-500/60"
+                    />
+                    {card.dueDate && (
+                      <button onClick={() => updateCard(columnId, card.id, { dueDate: undefined })} className="text-[12px] text-faint hover:text-secondary">Clear</button>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-subtle">Subtasks</div>
