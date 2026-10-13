@@ -43,9 +43,42 @@ const onEnter = (fn: () => void) => (e: React.KeyboardEvent<HTMLInputElement>) =
   if (e.key === 'Enter') { e.preventDefault(); fn(); }
 };
 
+type Dimension = 'width' | 'height' | 'diagonal';
+const DIMENSION_LABELS: Record<Dimension, string> = { width: 'Image Width', height: 'Image Height', diagonal: 'Image Diagonal' };
+
+// Everything downstream (viewing ratio, farthest viewer, element height %) is
+// defined against image height, so width/diagonal are converted to height
+// once, here, from the aspect ratio.
+const toHeight = (v: number, dim: Dimension, ar: number) =>
+  dim === 'height' ? v : dim === 'width' ? v / ar : v / Math.sqrt(1 + ar * ar);
+const fromHeight = (h: number, dim: Dimension, ar: number) =>
+  dim === 'height' ? h : dim === 'width' ? h * ar : h * Math.sqrt(1 + ar * ar);
+
+function DimensionToggle({ value, onChange }: { value: Dimension; onChange: (d: Dimension) => void }) {
+  return (
+    <>
+    <div className="mb-1 text-[11px] font-medium text-muted">Select the Known Image Parameter and Enter its Value</div>
+    <div className="mb-1.5 flex overflow-hidden rounded-md border border-border">
+      {(['width', 'height', 'diagonal'] as Dimension[]).map(key => (
+        <button key={key} onClick={() => onChange(key)}
+          className="flex-1 px-1.5 py-1 text-[10px] font-semibold capitalize transition-colors"
+          style={{
+            background: value === key ? 'rgba(139,92,246,0.12)' : 'rgb(var(--forge-surface) / 0.5)',
+            color: value === key ? '#a78bfa' : 'rgb(var(--text-subtle))',
+          }}>
+          {key}
+        </button>
+      ))}
+    </div>
+    </>
+  );
+}
+
 export default function DisplaySizingPage() {
   const [eyeLevel, setEyeLevel] = useState(48);
-  const [aspectRatio, setAspectRatio] = useState(1.78);
+  const [aspectRatio, setAspectRatio] = useState(16 / 9);
+  const [dim1, setDim1] = useState<Dimension>('height');
+  const [dim3, setDim3] = useState<Dimension>('height');
   const [c1ImageH, setC1ImageH] = useState('');
   const [c1MinElem, setC1MinElem] = useState('');
   const [c2Farthest, setC2Farthest] = useState('');
@@ -61,7 +94,7 @@ export default function DisplaySizingPage() {
     setColResults(rs => { const n = [...rs]; n[i] = r; return n; });
 
   const compute = (imageH: number, farthestViewer: number, floorToBottom: number | null, minElemH: number): CalcResult => {
-    const ar = aspectRatio || 1.78;
+    const ar = aspectRatio || 16 / 9;
     const el = eyeLevel || 48;
     const w = imageH * ar;
     const diag = Math.sqrt(w * w + imageH * imageH);
@@ -81,8 +114,20 @@ export default function DisplaySizingPage() {
   const resolveFromFarthest = (fv: number, pctElem: number) =>
     pctElem > 0 ? { h: fv / (2 * pctElem), minE: pctElem } : { h: fv / 6, minE: 3 };
 
+  // Switching the known parameter converts any value already typed, so the
+  // physical image size stays the same rather than silently changing meaning.
+  const switchDim = (
+    cur: Dimension, next: Dimension, val: string,
+    setVal: (v: string) => void, setDim: (d: Dimension) => void,
+  ) => {
+    const ar = aspectRatio || 16 / 9;
+    const v = parseFloat(val);
+    if (v > 0) setVal(String(Number(fromHeight(toHeight(v, cur, ar), next, ar).toFixed(4))));
+    setDim(next);
+  };
+
   const calcCol1 = () => {
-    const h = parseFloat(c1ImageH);
+    const h = toHeight(parseFloat(c1ImageH), dim1, aspectRatio || 16 / 9);
     if (!h || h <= 0) return;
     const { fv, pctEH } = resolveFromImageH(h, parseFloat(c1MinElem) || 0);
     updateResult(0, compute(h, fv, parseFloat(colFloors[0]) || null, pctEH));
@@ -97,7 +142,7 @@ export default function DisplaySizingPage() {
 
   const calcCol3 = () => {
     const fv = parseFloat(c3Farthest);
-    const h = parseFloat(c3ImageH);
+    const h = toHeight(parseFloat(c3ImageH), dim3, aspectRatio || 16 / 9);
     if (!fv || fv <= 0 || !h || h <= 0) return;
     const pctEH = (fv / h) / 2;
     updateResult(2, compute(h, fv, parseFloat(colFloors[2]) || null, pctEH));
@@ -112,10 +157,10 @@ export default function DisplaySizingPage() {
   };
 
   const presets = [
-    { label: '16:9 (HD/4K)', val: 1.78 },
-    { label: '16:10 (WUXGA)', val: 1.60 },
-    { label: '21:9 (Ultra-Wide)', val: 2.33 },
-    { label: '4:3 (NTSC/PAL)', val: 1.33 },
+    { label: '16:9 (HD/4K)', val: 16 / 9 },
+    { label: '16:10 (WUXGA)', val: 16 / 10 },
+    { label: '21:9 (Ultra-Wide)', val: 21 / 9 },
+    { label: '4:3 (NTSC/PAL)', val: 4 / 3 },
     { label: '2.39:1 (Anamorphic)', val: 2.39 },
   ];
 
@@ -148,7 +193,7 @@ export default function DisplaySizingPage() {
                   Image Aspect Ratio <span className="font-normal normal-case opacity-60">(as X.XX)</span>
                 </label>
                 <input
-                  type="number" value={aspectRatio} step={0.01}
+                  type="number" value={Number(aspectRatio.toFixed(4))} step={0.01}
                   onChange={e => setAspectRatio(parseFloat(e.target.value) || 0)}
                   className={inputCls + ' mb-1.5'}
                 />
@@ -186,7 +231,8 @@ export default function DisplaySizingPage() {
                 </div>
                 <div className="flex flex-1 flex-col gap-2">
                   <div>
-                    <label className="mb-1 block text-[11px] font-medium text-muted">Image Height</label>
+                    <DimensionToggle value={dim1} onChange={d => switchDim(dim1, d, c1ImageH, setC1ImageH, setDim1)} />
+                    <label className="mb-1 block text-[11px] font-medium text-muted">{DIMENSION_LABELS[dim1]}</label>
                     <input type="number" value={c1ImageH} onChange={e => setC1ImageH(e.target.value)} onKeyDown={onEnter(calcCol1)} placeholder="Enter value" className={inputCls} />
                   </div>
                   <div>
@@ -276,7 +322,8 @@ export default function DisplaySizingPage() {
                 </div>
                 <div className="flex flex-1 flex-col gap-2">
                   <div>
-                    <label className="mb-1 block text-[11px] font-medium text-muted">Image Height</label>
+                    <DimensionToggle value={dim3} onChange={d => switchDim(dim3, d, c3ImageH, setC3ImageH, setDim3)} />
+                    <label className="mb-1 block text-[11px] font-medium text-muted">{DIMENSION_LABELS[dim3]}</label>
                     <input type="number" value={c3ImageH} onChange={e => setC3ImageH(e.target.value)} onKeyDown={onEnter(calcCol3)} placeholder="Enter value" className={inputCls} />
                   </div>
                   <div>

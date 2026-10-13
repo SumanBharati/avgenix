@@ -116,8 +116,8 @@ export default function ProjectorThrowPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="h-full rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <SectionHeader title="Select Known Parameter to Calculate the Other" />
 
             {/* Mode radio buttons */}
@@ -285,7 +285,7 @@ export default function ProjectorThrowPage() {
           </div>
 
           {/* References */}
-          <div className="rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-5">
+          <div className="flex-1 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] p-5">
             <SectionHeader title="References" />
             <div className="space-y-2 font-mono text-[12px]">
               {isVariable ? (

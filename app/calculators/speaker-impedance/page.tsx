@@ -22,8 +22,8 @@ export default function SpeakerImpedancePage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Wiring Mode">
               <div className="flex flex-wrap gap-2">
                 {(['parallel', 'series', 'series-parallel'] as WiringMode[]).map(value => (
@@ -68,8 +68,8 @@ export default function SpeakerImpedancePage() {
         </div>
 
         {/* ── Right: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Results">
               <ResultCard
                 label="Computed Load"

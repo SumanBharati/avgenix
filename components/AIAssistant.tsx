@@ -429,12 +429,51 @@ export default function AIAssistant({ onAlertCount }: { onAlertCount?: (count: n
   );
 }
 
-// Simple markdown to HTML (bold, italic, code, lists, line breaks)
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+function splitTableRow(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+}
+
+// Converts GitHub-style markdown tables (header row, |---| separator, body rows)
+// into one-line HTML so the later newline→<br /> pass doesn't touch them.
+// Input is already HTML-escaped. Wrapped for horizontal scroll in the narrow chat panel.
+function renderTables(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!(TABLE_ROW.test(lines[i]) && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1]) && lines[i + 1].includes("-"))) {
+      out.push(lines[i]);
+      continue;
+    }
+    const aligns = splitTableRow(lines[i + 1]).map(c =>
+      c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : "left");
+    const cell = (tag: "th" | "td", content: string, idx: number) =>
+      `<${tag} class="border-b border-border px-2 py-1 align-top ${tag === "th" ? "font-semibold text-heading" : ""}" style="text-align:${aligns[idx] ?? "left"}">${content}</${tag}>`;
+    const head = splitTableRow(lines[i]).map((c, idx) => cell("th", c, idx)).join("");
+    let j = i + 2;
+    const body: string[] = [];
+    while (j < lines.length && TABLE_ROW.test(lines[j])) {
+      body.push(`<tr>${splitTableRow(lines[j]).map((c, idx) => cell("td", c, idx)).join("")}</tr>`);
+      j++;
+    }
+    out.push(
+      `<div class="my-2 overflow-x-auto"><table class="w-full border-collapse text-[12px]"><thead><tr>${head}</tr></thead><tbody>${body.join("")}</tbody></table></div>`
+    );
+    i = j - 1;
+  }
+  return out.join("\n");
+}
+
+// Simple markdown to HTML (bold, italic, code, lists, tables, line breaks)
 function formatMarkdown(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
+  return renderTables(
+    text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+  )
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`(.+?)`/g, '<code class="rounded bg-forge-panel px-1 py-0.5 text-[12px]">$1</code>')
@@ -443,8 +482,10 @@ function formatMarkdown(text: string): string {
     .replace(/^## (.+)$/gm, '<h3 class="mt-2 mb-1 text-[14px] font-semibold text-heading">$1</h3>')
     .replace(/^# (.+)$/gm, '<h2 class="mt-1 mb-1.5 text-[15px] font-bold text-heading">$1</h2>')
     .replace(/^- (.+)$/gm, '<li class="ml-3 list-disc text-[13px]">$1</li>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li class="ml-3 list-decimal text-[13px]">$2</li>')
+    // value="$1" pins each item to the number the model wrote; without an <ol>
+    // the browser would otherwise count every preceding <li> (bullets included).
+    .replace(/^(\d+)\. (.+)$/gm, '<li value="$1" class="ml-3 list-decimal text-[13px]">$2</li>')
     // block elements already break the line; don't add an extra <br /> after them
-    .replace(/(<\/(?:h[2-5]|li)>)\n/g, "$1")
+    .replace(/(<\/(?:h[2-5]|li|div)>)\n/g, "$1")
     .replace(/\n/g, "<br />");
 }

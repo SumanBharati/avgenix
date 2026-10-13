@@ -30,8 +30,8 @@ export default function RackHeatPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left half: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           <CalcSection title="Equipment">
             <div className="mb-1.5 grid grid-cols-[1fr_80px_30px] gap-1.5 text-[12px] font-semibold uppercase tracking-wide text-faint">
               <span>Device Name</span><span className="text-center">Watts</span><span></span>
@@ -52,8 +52,8 @@ export default function RackHeatPage() {
         </div>
 
         {/* ── Right half: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           <CalcSection title="Results">
             <div className="grid grid-cols-2 gap-2.5">
               <ResultCard label="Total Power" value={totalWatts.toLocaleString()} unit="W" accent />

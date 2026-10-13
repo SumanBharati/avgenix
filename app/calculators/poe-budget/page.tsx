@@ -115,8 +115,8 @@ export default function PoEBudgetPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left half: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           <CalcSection title="PoE Process">
             <div className="mb-2 text-xs leading-relaxed text-muted">
               <div>1. Find the power requirements for each device (from spec sheet)</div>
@@ -239,8 +239,8 @@ export default function PoEBudgetPage() {
         </div>
 
         {/* ── Right half: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           {/* Results */}
           <CalcSection title="Results">
             <div className="mb-2.5 grid grid-cols-2 gap-2.5">

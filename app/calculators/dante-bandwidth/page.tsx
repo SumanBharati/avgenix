@@ -42,8 +42,8 @@ export default function DanteBandwidthPage() {
       <div className="flex flex-col items-stretch gap-6 xl:flex-row">
 
         {/* ── Left column: Inputs + Results, stacked ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Inputs">
               <div className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
                 <SelectField label="Transport" value={transport} onChange={v => setTransport(v as DanteTransport)} options={[
@@ -153,8 +153,8 @@ export default function DanteBandwidthPage() {
         </div>
 
         {/* ── Right column: Calculation Guidelines ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Calculation Guidelines">
               <ul className="list-disc space-y-2 pl-4 text-[12px] leading-relaxed text-subtle">
                 <li>A standard Dante unicast flow can carry up to 4 audio channels to one receiving device.</li>

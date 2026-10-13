@@ -71,8 +71,8 @@ export default function ThrowRatioPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="h-full rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <SectionHeader title="Inputs" />
 
             {/* Mode toggle */}
@@ -151,8 +151,8 @@ export default function ThrowRatioPage() {
         </div>
 
         {/* ── Right: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="h-full rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <SectionHeader title="Results" />
 
             {/* Stat cards */}

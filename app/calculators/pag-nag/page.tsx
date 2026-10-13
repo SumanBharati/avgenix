@@ -18,8 +18,8 @@ export default function PAGNAGPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left half: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Distances">
               <InputField label="D1 — Source to Farthest Listener" value={d1} onChange={setD1} unit="ft" min={1} max={200} />
               <InputField label="D0 — Mic to Source" value={d0} onChange={setD0} unit="ft" min={0.5} max={50} step={0.5} />
@@ -30,8 +30,8 @@ export default function PAGNAGPage() {
         </div>
 
         {/* ── Right half: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
             <CalcSection title="Results">
               <div className="mb-2.5 grid grid-cols-2 gap-2.5">
                 <ResultCard label="PAG" value={pag.toFixed(1)} unit="dB" accent />

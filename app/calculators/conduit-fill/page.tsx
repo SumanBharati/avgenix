@@ -36,8 +36,8 @@ export default function ConduitFillPage() {
       <div className="flex flex-col items-stretch gap-6 lg:flex-row">
 
         {/* ── Left half: Inputs ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           <CalcSection title="Conduit">
             <div className="mb-3.5">
               <label className="mb-1.5 block text-[13px] font-semibold uppercase tracking-[0.05em] text-muted">Conduit Size (EMT)</label>
@@ -71,8 +71,8 @@ export default function ConduitFillPage() {
         </div>
 
         {/* ── Right half: Results ── */}
-        <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-border bg-forge-surface/50 p-5">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex-1 rounded-xl border border-border bg-forge-surface/50 p-5">
           <CalcSection title="Results">
             <div className="mb-2.5 grid grid-cols-2 gap-2.5">
               <ResultCard label="Actual Fill" value={actualFill.toFixed(1)} unit="%" accent />
