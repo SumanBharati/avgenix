@@ -38,6 +38,13 @@ export interface ScopeUnit {
    */
   mfr: string | null;
   model: string | null;
+  /**
+   * Set only by "Generate with AI" (lib/ai-design.ts) when the unit was
+   * matched to a real library product — which library and which row, so a
+   * tool materialising the unit later can place that product, not a generic.
+   */
+  productId?: string | null;
+  productSource?: "org" | "global" | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -186,12 +193,24 @@ export function wipeRoomDesignerEquipment(devices: any[]): any[] {
 }
 
 /**
+ * Flags and power markers are pinned to a block's port by device id — they
+ * are part of the equipment's wiring, not free drawing. Device ids restart
+ * when equipment is regenerated, so one left behind would silently re-attach
+ * to whatever new block reuses that id (a "1" flag that marked a network
+ * switch port turning up on a video bar's HDMI-IN).
+ */
+export function isPortAnchoredAnnotation(a: any): boolean {
+  return a?.type === "flag" || a?.type === "power";
+}
+
+/**
  * Clears Signal Flow's equipment. Every block goes, so every cable is left
  * dangling and every Location box is left empty — both are cleared with them
  * rather than rendering as lines into empty space and stray labelled frames.
- * Annotations live outside this and are preserved by the caller.
+ * Free annotations (text, shapes, highlights) are kept; port-anchored ones go
+ * with the equipment they point at (see isPortAnchoredAnnotation).
  */
-export function wipeSignalFlowEquipment(): { devices: any[]; connections: any[]; rooms: any[]; hiddenDevices: any[] } {
+export function wipeSignalFlowEquipment(annotations: any[] = []): { devices: any[]; connections: any[]; rooms: any[]; hiddenDevices: any[]; annotations: any[] } {
   // Hidden blocks are equipment too — a re-import replaces them as well.
-  return { devices: [], connections: [], rooms: [], hiddenDevices: [] };
+  return { devices: [], connections: [], rooms: [], hiddenDevices: [], annotations: (annotations || []).filter((a) => !isPortAnchoredAnnotation(a)) };
 }

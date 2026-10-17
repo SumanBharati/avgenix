@@ -78,18 +78,42 @@ Rules:
 - Prefer the most common real-world signal type for each link (e.g. HDMI between a source and a display or codec, Dante/"dante" for professional networked audio, "analog" for simple mic/line-level runs, "cat6" for HDBaseT/network video extension or IP control, "control" for RS-232/IR).
 - Give each connection a one-sentence "reason" explaining why it belongs in the system, and a "confidence" from 0 to 1. List connections most-confident first.
 - If a unit has no sensible place in the signal chain (e.g. it's genuinely standalone), give it whatever ports make sense for its role but propose no connection for it — don't invent a connection just to use every unit.
+- Some units are real, already-selected products and list "fixed ports". For those, return exactly the listed ports (same ids, names, signal types and directions) — don't add, drop or rename any — and wire them only through those ports. Only units without fixed ports get invented design-intent ports.
 
 Return your answer only via the ${TOOL_NAME} tool call — no other text.`;
 
 export async function POST(req: NextRequest) {
   try {
-    const { units } = await req.json();
+    const { units, references } = await req.json();
+    const referenceLines: string[] = Array.isArray(references) ? references.filter((r: any) => typeof r === "string").slice(0, 120) : [];
     if (!Array.isArray(units) || units.length === 0) {
       return NextResponse.json({ error: "units is required" }, { status: 400 });
     }
 
+    const signalIdSet = new Set<SignalTypeId>(SIGNAL_IDS);
+    // Units that are real library products arrive with their actual ports
+    // ("Generate with AI"); those are authoritative and override whatever the
+    // AI echoes back for them below.
+    const fixedPortsByItem = new Map<string, GeneratedDevice["ports"]>();
+    for (const u of units) {
+      if (!Array.isArray(u.ports) || u.ports.length === 0) continue;
+      fixedPortsByItem.set(u.itemId, u.ports
+        .filter((p: any) => p && typeof p.id === "string")
+        .map((p: any) => ({
+          id: p.id,
+          name: String(p.name || p.id),
+          signalType: signalIdSet.has(p.signalType) ? p.signalType : "proprietary",
+          direction: p.direction === "output" ? "output" : "input",
+        })));
+    }
+
     const unitLines = units
-      .map((u: any) => `- itemId: ${u.itemId} | label: ${u.label} | category: ${u.category} | location: ${u.location || "unspecified"}`)
+      .map((u: any) => {
+        const base = `- itemId: ${u.itemId} | label: ${u.label} | category: ${u.category} | location: ${u.location || "unspecified"}`;
+        const fixed = fixedPortsByItem.get(u.itemId);
+        if (!fixed) return base;
+        return `${base} | product: ${u.product || "selected product"} | fixed ports: ${fixed.map((p) => `${p.id} "${p.name}" (${p.signalType}, ${p.direction})`).join("; ")}`;
+      })
       .join("\n");
 
     const response = await anthropic.messages.create({
@@ -107,7 +131,9 @@ export async function POST(req: NextRequest) {
       messages: [
         {
           role: "user",
-          content: `Here are the generic AV equipment units for this room:\n\n${unitLines}\n\nPropose each unit's role, logical ports, and the wiring topology connecting them.`,
+          content: `Here are the generic AV equipment units for this room:\n\n${unitLines}\n\n${referenceLines.length
+            ? `Manufacturer reference wiring — REQUIRED. These cables come from the manufacturer's official wiring guide. Include every one of them exactly (same units, using the port with that name, or the closest port of that type), and don't propose any other cable on those ports:\n${referenceLines.map((l) => `- ${l}`).join("\n")}\n\nWire everything else as you normally would, around these.\n\n`
+            : ""}Propose each unit's role, logical ports, and the wiring topology connecting them.`,
         },
       ],
     });
@@ -119,14 +145,13 @@ export async function POST(req: NextRequest) {
     }
 
     const validItemIds = new Set(units.map((u: any) => u.itemId));
-    const signalIdSet = new Set<SignalTypeId>(SIGNAL_IDS);
 
     const devices: GeneratedDevice[] = (Array.isArray(raw.devices) ? raw.devices : [])
       .filter((d: any) => d && typeof d.itemId === "string" && validItemIds.has(d.itemId))
       .map((d: any) => ({
         itemId: d.itemId,
         role: ROLES.includes(d.role) ? d.role : "other",
-        ports: (Array.isArray(d.ports) ? d.ports : [])
+        ports: fixedPortsByItem.get(d.itemId) ?? (Array.isArray(d.ports) ? d.ports : [])
           .filter((p: any) => p && typeof p.id === "string" && typeof p.name === "string")
           .map((p: any) => ({
             id: p.id,
@@ -135,6 +160,11 @@ export async function POST(req: NextRequest) {
             direction: p.direction === "output" ? "output" : "input",
           })),
       }));
+
+    // A real product the AI left out still keeps its ports.
+    fixedPortsByItem.forEach((ports, itemId) => {
+      if (!devices.some((d) => d.itemId === itemId)) devices.push({ itemId, role: "other", ports });
+    });
 
     const proposedConnections: ProposedConnection[] = (Array.isArray(raw.connections) ? raw.connections : [])
       .filter((c: any) => c && c.sourceItemId && c.sourcePortId && c.targetItemId && c.targetPortId)

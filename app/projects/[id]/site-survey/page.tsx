@@ -315,8 +315,19 @@ export default function SiteSurveyPage({ params }: { params: { id: string } }) {
           }
         }
         setSurvey(s);
-        setActiveView({ type: "building", buildingId: s.buildings[0].id });
-        setExpandedBuildings(new Set([s.buildings[0].id]));
+        // ?room=<id>&section=<id> opens straight on that room's section —
+        // e.g. Generate with AI's "Write a Scope of Work first".
+        const qs = new URLSearchParams(window.location.search);
+        const linkRoom = qs.get("room");
+        const linkBuilding = linkRoom ? s.buildings.find((b) => (b.rooms || []).some((r) => r.id === linkRoom)) : undefined;
+        if (linkRoom && linkBuilding) {
+          const section = ROOM_SECTIONS.find((sec) => sec.id === qs.get("section")) || ROOM_SECTIONS[0];
+          setActiveView({ type: "room", buildingId: linkBuilding.id, roomId: linkRoom, sectionId: section.id });
+          setExpandedBuildings(new Set([linkBuilding.id]));
+        } else {
+          setActiveView({ type: "building", buildingId: s.buildings[0].id });
+          setExpandedBuildings(new Set([s.buildings[0].id]));
+        }
       });
   }, [params.id]);
 

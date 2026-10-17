@@ -16,6 +16,10 @@ export interface TopologyUnitInput {
   label: string;
   category: string;
   location: string | null;
+  /** A real library product's name, when this unit already is one. */
+  product?: string;
+  /** That product's actual ports — the AI must wire through exactly these. */
+  ports?: GeneratedDevice["ports"];
 }
 
 /**
@@ -65,11 +69,13 @@ export function validateProposedConnections(
 /** Asks AI to propose roles/ports/topology for a set of scope-generated units. */
 export async function fetchProposedTopology(
   units: TopologyUnitInput[],
+  /** Manufacturer reference cables the AI must include (lib/wiring). */
+  references: string[] = [],
 ): Promise<{ devices: GeneratedDevice[]; connections: ProposedConnection[] }> {
   const res = await fetch("/api/generate-signal-flow-topology", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ units }),
+    body: JSON.stringify({ units, references }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

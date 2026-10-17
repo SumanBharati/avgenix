@@ -69,11 +69,16 @@ export async function duplicateProject(sourceProjectId: string): Promise<{ id: s
     })(),
     (async () => {
       // Team assignments carry over by reference — member_id points at an
-      // org-scoped roster, which is valid unchanged for the new project too.
-      const { data, error } = await supabase.from("project_members").select("member_id, role, full_name, email").eq("project_id", sourceProjectId);
+      // org-scoped roster, and person_id at an external resource in the org's
+      // Schedule, both valid unchanged for the new project too. org_id must be
+      // copied as well: RLS only accepts the row when has_pro_access(org_id).
+      const { data, error } = await supabase.from("project_members").select("org_id, member_id, person_id, role, full_name, email").eq("project_id", sourceProjectId);
       if (error) { if (!isMissingTableError(error)) warnings.push(`project_members: ${error.message}`); return; }
       if (!data?.length) return;
-      const rows = data.map((r) => ({ project_id: newId, member_id: r.member_id, role: r.role, full_name: r.full_name, email: r.email }));
+      const rows = data.map((r) => ({
+        project_id: newId, org_id: (source as any).org_id ?? r.org_id,
+        member_id: r.member_id, person_id: r.person_id, role: r.role, full_name: r.full_name, email: r.email,
+      }));
       const { error: copyErr } = await supabase.from("project_members").insert(rows);
       if (copyErr && !isMissingTableError(copyErr)) warnings.push(`project_members: ${copyErr.message}`);
     })(),

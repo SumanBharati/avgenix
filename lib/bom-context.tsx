@@ -178,7 +178,7 @@ export function rackItemToBOM(i: any): BOMDeviceEntry {
  */
 function pendingScopeUnitToBOM(u: ScopeUnit): BOMDeviceEntry {
   return signalFlowDeviceToBOM({
-    itemId: u.itemId, productKey: u.productKey, mfr: 'Generic', model: u.name,
+    itemId: u.itemId, productKey: u.productKey, mfr: u.mfr || 'Generic', model: u.model || u.name,
     type: '', cat: u.category, price: 0,
   });
 }

@@ -22,8 +22,10 @@ import { loadToolData, saveToolData } from "@/lib/tool-data";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import {
   fetchScopeUnits, loadScopeManifest, saveScopeManifest,
-  wipeRoomDesignerEquipment, wipeSignalFlowEquipment, isRoomFurniture, SCOPE_REIMPORT_WARNING,
+  wipeRoomDesignerEquipment, wipeSignalFlowEquipment, isRoomFurniture, SCOPE_REIMPORT_WARNING, type ScopeUnit,
 } from "@/lib/scope-manifest";
+import type { AIDesignUnit, LibraryProduct } from "@/lib/ai-design";
+import GenerateWithAIModal from "@/components/GenerateWithAIModal";
 
 /* Theme-aware canvas colors */
 const canvasColors = {
@@ -619,6 +621,7 @@ export default function RoomDesignerPage() {
   const [clipboard,     setClipboard]     = useState<PlacedDevice[]>([]);
   const [generatingFromScope, setGeneratingFromScope] = useState(false);
   const [scopeReimportConfirm, setScopeReimportConfirm] = useState(false);
+  const [showAIDesign, setShowAIDesign] = useState(false);
   const [generateNotice, setGenerateNotice] = useState<{kind:"ok"|"error";message:string}|null>(null);
   const { isLibraryAdmin } = useLibraryAdmin();
   const [showHfov,      setShowHfov]      = useState(false);
@@ -2692,7 +2695,7 @@ export default function RoomDesignerPage() {
     // a "projection screen" as "display" (often lands in "other" instead),
     // but these still have real, unambiguous icons and shouldn't be skipped
     // just because the category guess was off.
-    if (l.includes("soundbar") || l.includes("video bar") || l.includes("conference bar")) return find("soundbar-cam");
+    if (l.includes("soundbar") || /\b(video|conference|conferencing|collaboration|meeting) bar\b/.test(l)) return find("soundbar-cam");
     if (l.includes("led") && (l.includes("wall") || l.includes("video wall"))) return find("led-wall");
     if (l.includes("projection screen") || l.includes("projector screen") || (l.includes("screen") && !l.includes("touch"))) return find("projector-screen");
     // A bare "projector" (no "screen" in the label — that case is already
@@ -2793,12 +2796,15 @@ export default function RoomDesignerPage() {
       loadToolData("rack-planner", roomParam, projectParam),
     ]);
     await Promise.all([
-      saveToolData("signal-flow", { ...(sf || {}), ...wipeSignalFlowEquipment() }, roomParam, projectParam),
+      saveToolData("signal-flow", { ...(sf || {}), ...wipeSignalFlowEquipment((sf as any)?.annotations) }, roomParam, projectParam),
       saveToolData("rack-planner", { ...(rack || {}), items: [], hiddenItems: [] }, roomParam, projectParam),
     ]);
   };
 
-  const generateDevicesFromScopeRD = async (isReimport = false) => {
+  // `aiUnits` is the "Generate with AI" path: units already designed and
+  // matched to library products by GenerateWithAIModal. The scope is still
+  // read here for Site Survey's room dimensions; errors go back to the modal.
+  const generateDevicesFromScopeRD = async (isReimport = false, aiUnits?: AIDesignUnit[]) => {
     // rdLoaded gates this room's own saved config (roomType/roomW/roomL/
     // roomH/placedDevices) having finished loading — without it, the
     // "is this room still untouched" check below could read this component's
@@ -2821,7 +2827,9 @@ export default function RoomDesignerPage() {
         const room = (b.rooms || []).find((r: any) => r.id === roomParam);
         if (room) { scopeText = room.data?.scope_of_work || ""; surveyRoomData = room.data || {}; break; }
       }
-      if (!scopeText.trim()) {
+      // Generate with AI can design a room with no written scope (it interviews
+      // the user instead), so only the plain scope import needs one.
+      if (!aiUnits && !scopeText.trim()) {
         setGenerateNotice({ kind: "error", message: "No Scope of Work found for this room — add one in Site Survey first." });
         window.setTimeout(() => setGenerateNotice(null), 5000);
         return;
@@ -2832,7 +2840,7 @@ export default function RoomDesignerPage() {
       // to be applied first and the AI call made afterwards, so a failed or
       // empty AI response left just the table and chairs on screen with no
       // walls or devices, and a re-import had already wiped the old equipment.
-      const items = await fetchScopeUnits(scopeText);
+      const items: (ScopeUnit & { product?: LibraryProduct | null })[] = aiUnits || await fetchScopeUnits(scopeText);
       if (!items.length) {
         setGenerateNotice({ kind: "error", message: "No AV devices were recognized in this room's Scope of Work — nothing was changed." });
         window.setTimeout(() => setGenerateNotice(null), 10000);
@@ -2843,7 +2851,7 @@ export default function RoomDesignerPage() {
       // materialise them from here even though no floor-plan symbol exists.
       if (isReimport) await wipeAllToolsForReimport();
       await saveScopeManifest(
-        { importedAt: Date.now(), importedBy: "room-designer", units: items, materialisedBy: ["room-designer"] },
+        { importedAt: Date.now(), importedBy: "room-designer", units: items.map(({ product, ...u }: any) => u), materialisedBy: ["room-designer"] },
         roomParam, projectParam,
       );
       // The import just rewrote Signal Flow's and the rack's saved data and the
@@ -2986,13 +2994,17 @@ export default function RoomDesignerPage() {
         // recognised here, in Signal Flow and in the rack.
         const uid = Date.now() + (seq++) + Math.random();
         const placed: PlacedDevice = {
-          ...template, itemId: item.itemId, productKey: item.productKey,
+          ...template, itemId: item.itemId,
           // Only when the scope text actually named a real manufacturer/model
           // for this unit (see generate-devices-from-scope's prompt) — same
           // conditional pattern as deviceFromBomUnit above, so a placeholder
           // template's own mfr/model isn't clobbered with nothing.
           ...(item.mfr ? { mfr: item.mfr, ...(item.model ? { model: item.model } : {}) } : {}),
-          rack_units: item.rackUnits, uid, name: item.name,
+          // A Generate with AI unit matched to a real library product carries
+          // that product's make/model/pricing/spec, exactly as a library pick.
+          ...(item.product ? libraryPickFields(item.product) : {}),
+          productKey: item.productKey,
+          rack_units: item.product ? (item.product.rack_units ?? null) : item.rackUnits, uid, name: item.name,
           x: 0, y: 0, z: 0, mountWall: mount, hfov, covShape, covDiameter, covW, covL, dispersion,
         };
         if (!byMount.has(mount)) byMount.set(mount, []);
@@ -3011,11 +3023,15 @@ export default function RoomDesignerPage() {
       setPlacedDevices(prev => [...prev, ...wallDevicesToAdd, ...allNewDevices]);
 
       const roomMsg = wallDevicesToAdd.length ? `Sized the room to Site Survey's dimensions, added walls, table and chairs; ` : "";
-      const addedMsg = allNewDevices.length ? `added ${allNewDevices.length} device${allNewDevices.length===1?"":"s"} from Scope of Work` : "no devices placed";
+      const matched = allNewDevices.filter(d => (d as any).productId).length;
+      const addedMsg = !allNewDevices.length ? "no devices placed"
+        : aiUnits ? `added ${allNewDevices.length} device${allNewDevices.length===1?"":"s"} with AI (${matched} from your library, ${allNewDevices.length - matched} generic)`
+        : `added ${allNewDevices.length} device${allNewDevices.length===1?"":"s"} from Scope of Work`;
       const skippedMsg = skipped.length ? `; ${skipped.length} item${skipped.length===1?"":"s"} skipped (no matching icon): ${skipped.join(", ")}` : "";
       setGenerateNotice({ kind: "ok", message: `${roomMsg}${addedMsg}${skippedMsg}.${roomShellNote}` });
       window.setTimeout(() => setGenerateNotice(null), roomShellNote ? 12000 : 7000);
     } catch (error: any) {
+      if (aiUnits) throw error; // the Generate with AI modal reports it
       setGenerateNotice({ kind: "error", message: `Generate from Scope failed: ${error?.message || "unable to generate devices from scope"}.` });
       window.setTimeout(() => setGenerateNotice(null), 10000);
     } finally {
@@ -5133,6 +5149,16 @@ export default function RoomDesignerPage() {
                     <path d="M12 2l1.8 5.2L19 9l-5.2 1.8L12 16l-1.8-5.2L5 9l5.2-1.8L12 2z"/>
                   </svg>
                   <span style={{fontSize:9,color:"rgb(var(--text-subtle))",lineHeight:1.3,whiteSpace:"nowrap",textAlign:"center"}}>{generatingFromScope?<>Generating…</>:<>Generate from<br/>Scope</>}</span>
+                </button>
+                <button onClick={()=>setShowAIDesign(true)} disabled={generatingFromScope || !rdLoaded || !projectParam || !roomParam || roomParam === "default"} title="Answer a few design questions and let AI design this room, using products from your library"
+                  style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,padding:"4px 12px",background:"transparent",border:"1px solid transparent",borderRadius:4,cursor:generatingFromScope?"default":"pointer",opacity:generatingFromScope?0.5:1,transition:"all 0.15s",minWidth:56}}
+                  onMouseEnter={e=>{if(!generatingFromScope){e.currentTarget.style.background="rgb(var(--forge-surface))";e.currentTarget.style.borderColor="rgb(var(--border))"}}}
+                  onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.borderColor="transparent"}}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="#8b5cf6">
+                    <path d="M10 2l1.6 4.4L16 8l-4.4 1.6L10 14l-1.6-4.4L4 8l4.4-1.6L10 2z"/>
+                    <path d="M18 12l.9 2.6 2.6.9-2.6.9L18 19l-.9-2.6-2.6-.9 2.6-.9L18 12z"/>
+                  </svg>
+                  <span style={{fontSize:9,color:"rgb(var(--text-subtle))",lineHeight:1.3,whiteSpace:"nowrap",textAlign:"center"}}>Generate<br/>with AI</span>
                 </button>
               </div>
               <span style={{fontSize:8,color:"rgb(var(--text-subtle))",textTransform:"uppercase",letterSpacing:"0.06em",textAlign:"center",paddingBottom:2,paddingTop:2}}>Create</span>
@@ -7755,6 +7781,17 @@ export default function RoomDesignerPage() {
           busy={generatingFromScope}
           onCancel={() => setScopeReimportConfirm(false)}
           onConfirm={() => { setScopeReimportConfirm(false); generateDevicesFromScopeRD(true); }}
+        />
+      )}
+
+      {showAIDesign && projectParam && roomParam && (
+        <GenerateWithAIModal
+          projectId={projectParam}
+          roomId={roomParam}
+          orgId={activeOrg?.id}
+          hasExistingEquipment={placedDevices.some(d => !isRoomFurniture(d)) || hiddenDevices.length > 0}
+          onClose={() => setShowAIDesign(false)}
+          onApply={(units, replace) => generateDevicesFromScopeRD(replace, units)}
         />
       )}
 
